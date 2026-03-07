@@ -1,0 +1,16 @@
+name: Build Windows EXE
+on: [push]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install pyinstaller watchdog openpyxl pandas
+      - run: pyinstaller --onefile --windowed --hidden-import=openpyxl --hidden-import=pandas --hidden-import=watchdog.observers.winapi --name "WoTTracker" main.py
+      - uses: actions/upload-artifact@v3
+        with:
+          name: WoTTracker-windows
+          path: dist/WoTTracker.exe
