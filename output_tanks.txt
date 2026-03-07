@@ -1,0 +1,81 @@
+116-F3
+121
+121B
+60TP Lewandowskiego
+AMX 50 B
+AMX 50 Foch (155)
+AMX 50 Foch B
+AMX M4 mle. 54
+Ares 90
+BZ-72-1
+BZ-75
+BZT-70
+Bat.-Châtillon 155 58
+Bat.-Châtillon 25 t
+CS-63
+Carro da Combattimento 45 t
+Centurion Action X
+Coccodrillo
+Concept No. 5
+Conqueror Gun Carriage
+Controcarro 3 Minotauro
+DBV-152
+E 100
+E 50 Ausf. M
+FV215b
+FV215b (183)
+FV217 Badger
+FV230 Canopener
+FV4005 Stage II
+Gryphon
+Ho-Ri 3
+Hurricane
+IS-4
+IS-7
+Jagdpanzer E 100
+K-91
+Kranvagn
+Lion
+M-V-Y
+M48A5 Patton
+Manticore
+Maus
+NC 70 Błyskawica
+Object 140
+Object 260
+Object 261
+Object 268
+Object 268 Version 4
+Object 268 Version V
+Object 277
+Object 279 early
+Object 430U
+Object 452K
+Object 705A
+Object 780
+Object 907
+Panhard EBR 105
+Pz.Kpfw. VII
+Rheinmetall Panzerwagen
+Rinoceronte
+ST-62 Version 2
+ST-II
+STB-1
+Strv 103B
+Super Conqueror
+T110E3
+T110E4
+T110E5
+T57 Heavy
+T95/FV4201 Chieftain
+T95E6
+TVP T 50/51
+Type 5 Heavy
+Type 71
+UDES 15/16
+VK 72.01 (K)
+Vz. 55
+Vz. 60S Dravec
+Vz. 71 Tesák
+WZ-111 model 5A
+WZ-113G FT

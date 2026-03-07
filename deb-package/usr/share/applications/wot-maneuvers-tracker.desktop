@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=WoT Maneuvers Tracker
+Comment=Track surviving and destroyed tanks during Maneuvers
+Exec=/usr/local/bin/wot-maneuvers-tracker
+Icon=wot-maneuvers-tracker
+Terminal=false
+Type=Application
+Categories=Game;Utility;

@@ -1,0 +1,6 @@
+Package: wot-maneuvers-tracker
+Version: 1.0.0
+Architecture: amd64
+Maintainer: Roman <roman@example.com>
+Description: WoT Maneuvers Tank Tracker
+ A tkinter GUI tool to track surviving and destroyed tanks during World of Tanks Maneuvers clan battles.
