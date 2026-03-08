@@ -154,6 +154,95 @@ def resolve_vehicle_name(vehicle_type: str, tag_to_name: dict[str, str]) -> str 
     return tag_to_name.get(tag)
 
 
+def record_destruction(path: str, player: str, tank: str, map_name: str, battle_time: str, all_players: list[str] = None):
+    if not path:
+        return
+
+    if _is_url(path):
+        try:
+            params_dict = {
+                "timestamp":   time.strftime('%Y-%m-%d %H:%M:%S'),
+                "player":      player,
+                "tank":        tank,
+                "map":         map_name,
+                "battle_time": battle_time,
+                "status":      "Destroyed",
+                "append":      "1"
+            }
+            if all_players:
+                params_dict["all_players"] = ",".join(sorted(all_players))
+            
+            params = urllib.parse.urlencode(params_dict)
+            url = f"{path}?{params}"
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                resp.read()
+        except Exception as e:
+            print(f"[!] Results Export Error: {e}", file=sys.stderr)
+    else:
+        if not HAS_OPENPYXL:
+            return
+        try:
+            from openpyxl import Workbook, load_workbook
+            p = Path(path)
+            if p.exists():
+                wb = load_workbook(path)
+                ws = wb.active
+            else:
+                wb = Workbook()
+                ws = wb.active
+                wb.save(path) # Initial save to avoid issues
+
+            # --- Side-by-side Table Logic ---
+            # We look for a table that matches our current player group.
+            # Tables start with a header row. We check every 8 columns (6 data + 2 gap).
+            
+            current_squad_key = ",".join(sorted(all_players)) if all_players else "default"
+            target_col_start = 1
+            found_table = False
+            
+            # Search existing headers for a match or find the first empty spot
+            max_col = ws.max_column
+            for c in range(1, max_col + 10, 8):
+                cell_val = ws.cell(row=1, column=c).value
+                if not cell_val: # Empty spot
+                    target_col_start = c
+                    break
+                
+                # Check "Squad ID" or similar identifier in a hidden or specific row?
+                # For now, let's use a hidden row (e.g. Row 1000) or just match the first player.
+                # Simpler: We'll store the squad key in a comment or a specific cell far away?
+                # Actually, let's just store it in Row 1 of the gap column (c+6).
+                squad_id_cell = ws.cell(row=1, column=c+6).value
+                if squad_id_cell == current_squad_key:
+                    target_col_start = c
+                    found_table = True
+                    break
+            
+            if not found_table:
+                # Initialize new table headers
+                headers = ["Timestamp", "Player", "Tank", "Map", "Battle Time", "Status"]
+                for i, h in enumerate(headers):
+                    ws.cell(row=1, column=target_col_start + i, value=h)
+                # Store squad key in the gap column
+                ws.cell(row=1, column=target_col_start + 6, value=current_squad_key)
+
+            # Find next empty row in this specific table (columns target_col_start to target_col_start+5)
+            next_row = 2
+            while ws.cell(row=next_row, column=target_col_start).value:
+                next_row += 1
+            
+            row_data = [
+                time.strftime('%Y-%m-%d %H:%M:%S'),
+                player, tank, map_name, battle_time, "Destroyed"
+            ]
+            for i, val in enumerate(row_data):
+                ws.cell(row=next_row, column=target_col_start + i, value=val)
+            
+            wb.save(path)
+        except Exception as e:
+            print(f"[!] Failed to record destruction to Excel: {e}", file=sys.stderr)
+
+
 # ── remaining tanks: Excel ─────────────────────────────────────────────────────
 
 def _is_url(path: str) -> bool:
@@ -184,12 +273,13 @@ def _normalize_excel_url(url: str) -> str:
     return url
 
 
-def load_tanks_from_excel(path: str) -> dict[str, list[str] | str]:
+def load_tanks_from_excel(path: str, clan_members: set[str] = None) -> dict[str, list[str] | str]:
     """
     Reads tank names from columns of an Excel file or URL.
     Assigns each column to a player (first non-numeric row is player name, rest are tanks).
     """
     result: dict[str, list[str] | str] = {}
+    normalized_members = {m.lower() for m in clan_members} if clan_members else None
     
     def _process_cells(cells):
         name = None
@@ -204,6 +294,9 @@ def load_tanks_from_excel(path: str) -> dict[str, list[str] | str]:
                 t = cell.replace("⭐", "").strip()
                 if t: tanks.append(t)
         if name:
+            # Strictly validate against clan members if provided
+            if normalized_members is not None and name.lower() not in normalized_members:
+                return
             result[name.lower()] = tanks
             result[f"{name.lower()}_display"] = name
 
@@ -645,14 +738,31 @@ class SettingsWindow(tk.Toplevel):
         tk.Button(btn_frame, text="✕", command=lambda: self.excel_var.set(""),
                   bg=BG2, fg=RED, activebackground=RED, activeforeground=BG,
                   relief="flat", font=FONT, cursor="hand2", width=2).pack(side="left")
-        tk.Label(self, text="URL or local path — falls back to WoT API", font=FONT_SM,
-                 bg=BG, fg=TEXT_DIM).grid(row=7, column=1, sticky="w", padx=12, pady=(0, 4))
+        
+        # Results Excel (optional)
+        tk.Label(self, text="Results Output", font=FONT, bg=BG, fg=TEXT).grid(
+            row=7, column=0, sticky="w", **pad)
+        self.results_var = tk.StringVar(value=cfg.get("results_excel_path", ""))
+        results_entry = tk.Entry(self, textvariable=self.results_var, width=42, bg=BG2, fg=TEXT,
+                                 insertbackground=TEXT, relief="flat", font=FONT)
+        results_entry.grid(row=7, column=1, sticky="ew", **pad)
+        res_btn_frame = tk.Frame(self, bg=BG)
+        res_btn_frame.grid(row=7, column=2, padx=(0, 12))
+        tk.Button(res_btn_frame, text="Browse", command=self._browse_results, bg=BG2, fg=ACCENT,
+                  activebackground=ACCENT, activeforeground=BG, relief="flat",
+                  font=FONT, cursor="hand2").pack(side="left", padx=(0, 4))
+        tk.Button(res_btn_frame, text="✕", command=lambda: self.results_var.set(""),
+                  bg=BG2, fg=RED, activebackground=RED, activeforeground=BG,
+                  relief="flat", font=FONT, cursor="hand2", width=2).pack(side="left")
+
+        tk.Label(self, text="Input URL or path for tanks / Output path/URL for results", font=FONT_SM,
+                 bg=BG, fg=TEXT_DIM).grid(row=8, column=1, sticky="w", padx=12, pady=(0, 4))
 
         # Players order
         tk.Label(self, text="Players order", font=FONT, bg=BG, fg=TEXT).grid(
-            row=8, column=0, sticky="nw", padx=12, pady=6)
+            row=9, column=0, sticky="nw", padx=12, pady=6)
         order_frame = tk.Frame(self, bg=BG)
-        order_frame.grid(row=8, column=1, sticky="ew", padx=12, pady=6)
+        order_frame.grid(row=9, column=1, sticky="ew", padx=12, pady=6)
         self.order_text = tk.Text(order_frame, bg=BG2, fg=TEXT, insertbackground=TEXT,
                                   relief="flat", font=FONT, height=4, width=36,
                                   wrap="none")
@@ -665,18 +775,18 @@ class SettingsWindow(tk.Toplevel):
         self.order_text.insert("1.0", existing_order)
         tk.Label(self, text="one name per line — shown first in Remaining Tanks",
                  font=FONT_SM, bg=BG, fg=TEXT_DIM).grid(
-            row=9, column=1, sticky="w", padx=12, pady=(0, 4))
+            row=10, column=1, sticky="w", padx=12, pady=(0, 4))
 
         # Record since timestamp
         tk.Label(self, text="Record since", font=FONT, bg=BG, fg=TEXT).grid(
-            row=10, column=0, sticky="nw", padx=12, pady=6)
+            row=11, column=0, sticky="nw", padx=12, pady=6)
         
         default_ts = cfg.get("record_since", time.time() - 7200)
         dt_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(default_ts))
         self.record_since_var = tk.StringVar(value=dt_str)
         
         rs_frame = tk.Frame(self, bg=BG)
-        rs_frame.grid(row=10, column=1, sticky="w", padx=12, pady=6)
+        rs_frame.grid(row=11, column=1, sticky="w", padx=12, pady=6)
         tk.Entry(rs_frame, textvariable=self.record_since_var, width=20, bg=BG2, fg=TEXT,
                  insertbackground=TEXT, relief="flat", font=FONT).pack(side="left")
         tk.Label(rs_frame, text=" (YYYY-MM-DD HH:MM:SS)", font=FONT_SM, bg=BG, fg=TEXT_DIM).pack(side="left")
@@ -685,7 +795,7 @@ class SettingsWindow(tk.Toplevel):
         tk.Button(self, text="Save & Start", command=self._save,
                   bg=ACCENT, fg=BG, activebackground=TEXT, activeforeground=BG,
                   relief="flat", font=FONT_BOLD, cursor="hand2", padx=16, pady=6).grid(
-            row=11, column=0, columnspan=3, pady=(8, 16))
+            row=12, column=0, columnspan=3, pady=(8, 16))
 
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
@@ -702,6 +812,15 @@ class SettingsWindow(tk.Toplevel):
         )
         if path:
             self.excel_var.set(path)
+
+    def _browse_results(self):
+        path = filedialog.asksaveasfilename(
+            title="Select destruction results Excel file",
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
+        )
+        if path:
+            self.results_var.set(path)
 
     def _save(self):
         path = self.path_var.get().strip()
@@ -727,6 +846,7 @@ class SettingsWindow(tk.Toplevel):
             "battle_type_choice": self.bt_var.get(),
             "tier":               self.tier_var.get(),
             "excel_path":         self.excel_var.get().strip(),
+            "results_excel_path": self.results_var.get().strip(),
             "players_order":      order_list,
             "record_since":       record_since,
         }
@@ -762,6 +882,7 @@ class App(tk.Tk):
         self._remaining_tanks:  list[str]             = []  # excel mode: flat list
         self._member_tanks:     dict[str, list[str]]  = {}  # api mode: player→[tanks]
         self._remaining_source: str                   = ""  # "excel" | "api" | ""
+        self._clan_members:     set[str]              = set()
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -962,6 +1083,23 @@ class App(tk.Tk):
 
     def _on_tankopedia_ready(self):
         self._log_msg(f"Tankopedia loaded: {len(self._tag_to_name)} tanks")
+        self._set_status(f"Fetching clan members…", ACCENT)
+        threading.Thread(target=self._load_clan_members, daemon=True).start()
+
+    def _load_clan_members(self):
+        cfg = self._cfg
+        member_ids = fetch_clan_member_ids(APP_ID, cfg.get("realm", "eu"), cfg["clan_tag"])
+        if member_ids:
+            names_dict = fetch_account_names(APP_ID, cfg.get("realm", "eu"), member_ids)
+            self._clan_members = set(names_dict.values())
+            self.after(0, lambda: self._log_msg(f"Clan members fetched: {len(self._clan_members)} members"))
+        else:
+            self._clan_members = set()
+            self.after(0, lambda: self._log_msg("[!] Failed to fetch clan members, filtering will be less accurate"))
+        
+        self.after(0, self._on_clan_ready)
+
+    def _on_clan_ready(self):
         self._set_status(f"Watching [{self._cfg['clan_tag']}]", GREEN)
         self._already_parsed.clear()
         self._destroyed.clear()
@@ -981,8 +1119,9 @@ class App(tk.Tk):
 
     def _load_remaining_excel(self, path: str):
         self._remaining_lbl.configure(text="Loading from Excel…", fg=ACCENT)
+        clan_members = self._clan_members
         def run():
-            names = load_tanks_from_excel(path)
+            names = load_tanks_from_excel(path, clan_members=clan_members)
             self.after(0, lambda: self._on_remaining_excel(names))
         threading.Thread(target=run, daemon=True).start()
 
@@ -1001,6 +1140,7 @@ class App(tk.Tk):
         )
         self._log_msg(f"[tanks] Loaded {total_tanks} tanks for {total_players} players from Excel")
         self._refresh_remaining()
+
 
     def _load_remaining_api(self):
         if not self._cfg.get("clan_tag"):
@@ -1223,6 +1363,18 @@ class App(tk.Tk):
                         (ev["veh_name"], ev["death_label"], ev["map"], ev["battle_time"], False, replay_name)
                     )
                     new_count += 1
+                    
+                    # Record to Excel if configured
+                    # Record to Excel if configured
+                    results_path = self._cfg.get("results_excel_path")
+                    if results_path:
+                        # Current squad players for state-aware groups
+                        all_players = [v for k, v in self._member_tanks.items() if str(k).endswith("_display")]
+                        threading.Thread(
+                            target=record_destruction,
+                            args=(results_path, player, ev["veh_name"], ev["map"], ev["battle_time"], all_players),
+                            daemon=True
+                        ).start()
             else:
                 if replay_name not in self._pending_keys:
                     self._pending_keys.add(replay_name)

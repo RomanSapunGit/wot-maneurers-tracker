@@ -5,14 +5,7 @@
   "battle_type_choice": "2",
   "tier": 10,
   "excel_path": "https://docs.google.com/spreadsheets/d/15szJUXl3OeW0qUpNyjBEFDKazuWBOf1mdBG6X1pYXXU/edit?gid=1253680866#gid=1253680866",
-  "players_order": [
-    "Elkronos121",
-    "EternaI_Dream",
-    "otkata_",
-    "IVRONI",
-    "_NOIXEX_",
-    "SASHA777_149",
-    "SilinnV2"
-  ],
+  "results_excel_path": "https://script.google.com/macros/s/AKfycbyAr4ZxQBWPlNUFyeFQ2Fy5T-2UA2iYMZUK0TNr7qqDEfwjpv8Y-87sg-Pi9RJXDVP0oQ/exec",
+  "players_order": [],
   "record_since": 1772903259.0
 }
