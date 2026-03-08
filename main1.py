@@ -8,7 +8,9 @@ import time
 import threading
 import urllib.request
 import urllib.parse
+import asyncio
 import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
 try:
     from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
@@ -36,6 +38,7 @@ CONFIG_FILE              = Path(__file__).parent / "config.json"
 APP_ID                   = "8520bbd86713bb4f2f6c4f2cd7a66d29"
 INCOMPLETE_GRACE_SECONDS = 600
 WATCH_POLL_INTERVAL      = 3
+EXCEL_LOCK               = threading.Lock()
 
 BATTLE_TYPE_OPTIONS = {
     "1": ("Random battles",   [1]),
@@ -158,20 +161,19 @@ def record_destruction(path: str, player: str, tank: str, map_name: str, battle_
     if not path:
         return
 
+    # Clean player name (remove [TAG] etc)
+    if " " in player: player = player.split(" ")[-1]
+    if "]" in player: player = player.split("]")[-1]
+    player = player.strip()
+
     if _is_url(path):
         try:
+            # Simplified payload for Format B (Google Sheets script will handle the logic)
             params_dict = {
-                "timestamp":   time.strftime('%Y-%m-%d %H:%M:%S'),
                 "player":      player,
                 "tank":        tank,
-                "map":         map_name,
-                "battle_time": battle_time,
                 "status":      "Destroyed",
-                "append":      "1"
             }
-            if all_players:
-                params_dict["all_players"] = ",".join(sorted(all_players))
-            
             params = urllib.parse.urlencode(params_dict)
             url = f"{path}?{params}"
             with urllib.request.urlopen(url, timeout=10) as resp:
@@ -181,66 +183,75 @@ def record_destruction(path: str, player: str, tank: str, map_name: str, battle_
     else:
         if not HAS_OPENPYXL:
             return
-        try:
-            from openpyxl import Workbook, load_workbook
-            p = Path(path)
-            if p.exists():
-                wb = load_workbook(path)
-                ws = wb.active
-            else:
-                wb = Workbook()
-                ws = wb.active
-                wb.save(path) # Initial save to avoid issues
+        
+        with EXCEL_LOCK:
+            try:
+                from openpyxl import Workbook, load_workbook
+                p = Path(path)
+                if p.exists():
+                    # Set data_only=False to keep formulas if any, though not needed here
+                    wb = load_workbook(path)
+                    ws = wb.active
+                else:
+                    wb = Workbook()
+                    ws = wb.active
+                    wb.save(path)
 
-            # --- Side-by-side Table Logic ---
-            # We look for a table that matches our current player group.
-            # Tables start with a header row. We check every 8 columns (6 data + 2 gap).
-            
-            current_squad_key = ",".join(sorted(all_players)) if all_players else "default"
-            target_col_start = 1
-            found_table = False
-            
-            # Search existing headers for a match or find the first empty spot
-            max_col = ws.max_column
-            for c in range(1, max_col + 10, 8):
-                cell_val = ws.cell(row=1, column=c).value
-                if not cell_val: # Empty spot
-                    target_col_start = c
-                    break
+                # 1. Search ALL columns in row 1 for the player name
+                target_col = -1
+                last_used_col = 0
+                for c in range(1, 1001): # Scan up to 1000 columns
+                    val = ws.cell(row=1, column=c).value
+                    if val:
+                        last_used_col = c
+                        if str(val).strip().lower() == player.lower():
+                            target_col = c
+                            break
                 
-                # Check "Squad ID" or similar identifier in a hidden or specific row?
-                # For now, let's use a hidden row (e.g. Row 1000) or just match the first player.
-                # Simpler: We'll store the squad key in a comment or a specific cell far away?
-                # Actually, let's just store it in Row 1 of the gap column (c+6).
-                squad_id_cell = ws.cell(row=1, column=c+6).value
-                if squad_id_cell == current_squad_key:
-                    target_col_start = c
-                    found_table = True
-                    break
-            
-            if not found_table:
-                # Initialize new table headers
-                headers = ["Timestamp", "Player", "Tank", "Map", "Battle Time", "Status"]
-                for i, h in enumerate(headers):
-                    ws.cell(row=1, column=target_col_start + i, value=h)
-                # Store squad key in the gap column
-                ws.cell(row=1, column=target_col_start + 6, value=current_squad_key)
+                # 2. If not found, find the spot for a new player
+                if target_col == -1:
+                    # Place new player after the last used column + 1 gap
+                    target_col = last_used_col + 2 if last_used_col > 0 else 1
+                    ws.cell(row=1, column=target_col, value=player)
+                
+                if target_col != -1:
+                    # 3. Find tank in this player's list or find first empty row
+                    row = 2
+                    found_row = -1
+                    while True:
+                        t_val = ws.cell(row=row, column=target_col).value
+                        if not t_val:
+                            found_row = row
+                            break
+                        if str(t_val).strip().lower() == tank.strip().lower():
+                            found_row = row
+                            break
+                        row += 1
+                    
+                    # 4. Update status with counter (Format B)
+                    ws.cell(row=found_row, column=target_col,     value=tank)
+                    
+                    # Read current status to increment counter
+                    status_cell = ws.cell(row=found_row, column=target_col + 1)
+                    current_val = str(status_cell.value or "").strip()
+                    
+                    count = 1
+                    if "X" in current_val.upper():
+                        try:
+                            # Extract number after X
+                            parts = current_val.upper().split("X")
+                            if parts[-1].isdigit():
+                                count = int(parts[-1]) + 1
+                        except:
+                            count = 1
+                    elif current_val.lower() == "destroyed":
+                        count = 2
+                    
+                    status_cell.value = f"Destroyed X{count}"
 
-            # Find next empty row in this specific table (columns target_col_start to target_col_start+5)
-            next_row = 2
-            while ws.cell(row=next_row, column=target_col_start).value:
-                next_row += 1
-            
-            row_data = [
-                time.strftime('%Y-%m-%d %H:%M:%S'),
-                player, tank, map_name, battle_time, "Destroyed"
-            ]
-            for i, val in enumerate(row_data):
-                ws.cell(row=next_row, column=target_col_start + i, value=val)
-            
-            wb.save(path)
-        except Exception as e:
-            print(f"[!] Failed to record destruction to Excel: {e}", file=sys.stderr)
+                wb.save(path)
+            except Exception as e:
+                print(f"[!] Failed to record destruction to Excel: {e}", file=sys.stderr)
 
 
 # ── remaining tanks: Excel ─────────────────────────────────────────────────────
@@ -777,19 +788,52 @@ class SettingsWindow(tk.Toplevel):
                  font=FONT_SM, bg=BG, fg=TEXT_DIM).grid(
             row=10, column=1, sticky="w", padx=12, pady=(0, 4))
 
-        # Record since timestamp
-        tk.Label(self, text="Record since", font=FONT, bg=BG, fg=TEXT).grid(
+        # Record since timestamp (User-friendly presets)
+        tk.Label(self, text="Scan Window", font=FONT, bg=BG, fg=TEXT).grid(
             row=11, column=0, sticky="nw", padx=12, pady=6)
+        
+        rs_frame = tk.Frame(self, bg=BG)
+        rs_frame.grid(row=11, column=1, sticky="w", padx=12, pady=6)
+        
+        self.preset_map = {
+            "Last 2 hours":   "2h",
+            "Last 4 hours":   "4h",
+            "Last 8 hours":   "8h",
+            "Last 24 hours":  "24h",
+            "Today (00:00)": "today",
+            "Custom Date":    "custom"
+        }
+        self.preset_rev = {v: k for k, v in self.preset_map.items()}
+        
+        current_preset = cfg.get("time_window_preset", "2h")
+        self.preset_var = tk.StringVar(value=self.preset_rev.get(current_preset, "Last 2 hours"))
+        
+        self.preset_combo = ttk.Combobox(rs_frame, textvariable=self.preset_var, 
+                                         values=list(self.preset_map.keys()),
+                                         state="readonly", width=15)
+        self.preset_combo.pack(side="left")
         
         default_ts = cfg.get("record_since", time.time() - 7200)
         dt_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(default_ts))
         self.record_since_var = tk.StringVar(value=dt_str)
         
-        rs_frame = tk.Frame(self, bg=BG)
-        rs_frame.grid(row=11, column=1, sticky="w", padx=12, pady=6)
-        tk.Entry(rs_frame, textvariable=self.record_since_var, width=20, bg=BG2, fg=TEXT,
-                 insertbackground=TEXT, relief="flat", font=FONT).pack(side="left")
-        tk.Label(rs_frame, text=" (YYYY-MM-DD HH:MM:SS)", font=FONT_SM, bg=BG, fg=TEXT_DIM).pack(side="left")
+        self.custom_entry = tk.Entry(rs_frame, textvariable=self.record_since_var, width=20, bg=BG2, fg=TEXT,
+                                     insertbackground=TEXT, relief="flat", font=FONT)
+        self.custom_entry.pack(side="left", padx=(10, 0))
+        
+        self.custom_lbl = tk.Label(rs_frame, text=" (YYYY-MM-DD HH:MM:SS)", font=FONT_SM, bg=BG, fg=TEXT_DIM)
+        self.custom_lbl.pack(side="left")
+
+        def _on_preset_change(e=None):
+            if self.preset_map.get(self.preset_var.get()) == "custom":
+                self.custom_entry.pack(side="left", padx=(10, 0))
+                self.custom_lbl.pack(side="left")
+            else:
+                self.custom_entry.pack_forget()
+                self.custom_lbl.pack_forget()
+        
+        self.preset_combo.bind("<<ComboboxSelected>>", _on_preset_change)
+        _on_preset_change()
 
         # Save button
         tk.Button(self, text="Save & Start", command=self._save,
@@ -849,6 +893,7 @@ class SettingsWindow(tk.Toplevel):
             "results_excel_path": self.results_var.get().strip(),
             "players_order":      order_list,
             "record_since":       record_since,
+            "time_window_preset": self.preset_map.get(self.preset_var.get(), "2h"),
         }
         save_config(cfg)
         self.on_save(cfg)
@@ -884,13 +929,42 @@ class App(tk.Tk):
         self._remaining_source: str                   = ""  # "excel" | "api" | ""
         self._clan_members:     set[str]              = set()
 
+        # --- Asyncio Infrastructure ---
+        self._loop = asyncio.new_event_loop()
+        self._destruction_queue = asyncio.Queue()
+        self._async_thread = threading.Thread(target=self._run_async_loop, daemon=True)
+        self._async_thread.start()
+
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         if not self._cfg.get("replays_path") or not self._cfg.get("clan_tag"):
             self.after(100, self._open_settings)
         else:
-            self.after(100, lambda: self._apply_config(self._cfg))
+            self.after(100, lambda: self.submit_async(self._apply_config_async(self._cfg)))
+
+    def _run_async_loop(self):
+        """Entry point for the background async thread."""
+        asyncio.set_event_loop(self._loop)
+        # Start the consumer for destructions
+        self._loop.create_task(self._destruction_worker())
+        self._loop.run_forever()
+
+    def submit_async(self, coro):
+        """Submit a coroutine to the background loop."""
+        return asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+    async def _destruction_worker(self):
+        """Consume and process destruction events from the queue sequentially."""
+        while True:
+            args = await self._destruction_queue.get()
+            try:
+                # Run the blocking record_destruction in a thread to keep the loop free
+                await asyncio.to_thread(record_destruction, *args)
+            except Exception as e:
+                print(f"[!] Destruction worker error: {e}", file=sys.stderr)
+            finally:
+                self._destruction_queue.task_done()
 
     # ── UI ─────────────────────────────────────────────────────────────────────
 
@@ -906,7 +980,8 @@ class App(tk.Tk):
                                     bg=BG, fg=TEXT_DIM)
         self._status_lbl.pack(side="left", padx=12)
         for text, cmd in [("⚙ Settings", self._open_settings),
-                          ("🔄 Scan now", self._manual_scan),
+                          ("🔍 Scan Now", self._manual_scan),
+                          ("📤 Export Results", self._manual_export),
                           ("🗑 Reset", self._reset)]:
             tk.Button(btn_frame, text=text, command=cmd, bg=BG2, fg=TEXT,
                       activebackground=ACCENT, activeforeground=BG,
@@ -1058,39 +1133,47 @@ class App(tk.Tk):
         SettingsWindow(self, self._cfg, on_save=self._apply_config)
 
     def _apply_config(self, cfg: dict):
+        """Sync wrapper to bridge Tkinter UI to the async loop."""
+        self.submit_async(self._apply_config_async(cfg))
+
+    async def _apply_config_async(self, cfg: dict):
         self._cfg = cfg
         replays_path = Path(cfg["replays_path"])
         if (replays_path / "replays").exists():
             replays_path = replays_path / "replays"
         if not replays_path.exists():
-            messagebox.showerror("Path not found", f"Replays folder not found:\n{replays_path}")
+            self.after(0, lambda: messagebox.showerror("Path not found", f"Replays folder not found:\n{replays_path}"))
             return
         self._replays_dir  = replays_path
         bt_choice          = cfg.get("battle_type_choice", "2")
         _, self._battle_filter = BATTLE_TYPE_OPTIONS.get(bt_choice, BATTLE_TYPE_OPTIONS["2"])
-        self._set_status("Loading tankopedia…", ACCENT)
-        threading.Thread(target=self._load_tankopedia, daemon=True).start()
+        
+        self.after(0, lambda: self._set_status("Loading tankopedia…", ACCENT))
+        await self._load_tankopedia_async()
 
-    def _load_tankopedia(self):
+    async def _load_tankopedia_async(self):
         def progress(msg):
             self.after(0, lambda: self._log_msg(msg))
             self.after(0, lambda: self._set_status(msg, ACCENT))
-        self._tag_to_name, self._tank_id_to_name = fetch_tag_to_name(
-            APP_ID, self._cfg.get("realm", "eu"),
-            self._cfg.get("tier", 10), progress
+        
+        # Offload blocking network to thread
+        self._tag_to_name, self._tank_id_to_name = await asyncio.to_thread(
+            fetch_tag_to_name, APP_ID, self._cfg.get("realm", "eu"), self._cfg.get("tier", 10), progress
         )
         self.after(0, self._on_tankopedia_ready)
 
     def _on_tankopedia_ready(self):
         self._log_msg(f"Tankopedia loaded: {len(self._tag_to_name)} tanks")
         self._set_status(f"Fetching clan members…", ACCENT)
-        threading.Thread(target=self._load_clan_members, daemon=True).start()
+        self.submit_async(self._load_clan_members_async())
 
-    def _load_clan_members(self):
+    async def _load_clan_members_async(self):
         cfg = self._cfg
-        member_ids = fetch_clan_member_ids(APP_ID, cfg.get("realm", "eu"), cfg["clan_tag"])
+        # Offload blocking network to thread
+        member_ids = await asyncio.to_thread(fetch_clan_member_ids, APP_ID, cfg.get("realm", "eu"), cfg["clan_tag"])
+        
         if member_ids:
-            names_dict = fetch_account_names(APP_ID, cfg.get("realm", "eu"), member_ids)
+            names_dict = await asyncio.to_thread(fetch_account_names, APP_ID, cfg.get("realm", "eu"), member_ids)
             self._clan_members = set(names_dict.values())
             self.after(0, lambda: self._log_msg(f"Clan members fetched: {len(self._clan_members)} members"))
         else:
@@ -1103,27 +1186,30 @@ class App(tk.Tk):
         self._set_status(f"Watching [{self._cfg['clan_tag']}]", GREEN)
         self._already_parsed.clear()
         self._destroyed.clear()
-        self._do_scan()
+        # Startup scan: silent and NO export
+        self.submit_async(self._do_scan_async(silent=False, do_export=False))
         self._start_watcher()
-        self._load_remaining()
+        self.submit_async(self._load_remaining_async())
 
     # ── remaining tanks ────────────────────────────────────────────────────────
 
     def _load_remaining(self):
+        """Load tank list triggered from UI."""
+        self.submit_async(self._load_remaining_async())
+
+    async def _load_remaining_async(self):
         """Load tank list from Excel/URL if configured, else fetch from WoT API."""
         excel_path = self._cfg.get("excel_path", "").strip()
         if excel_path and (_is_url(excel_path) or Path(excel_path).exists()):
-            self._load_remaining_excel(excel_path)
+            await self._load_remaining_excel_async(excel_path)
         else:
-            self._load_remaining_api()
+            await self._load_remaining_api_async()
 
-    def _load_remaining_excel(self, path: str):
-        self._remaining_lbl.configure(text="Loading from Excel…", fg=ACCENT)
+    async def _load_remaining_excel_async(self, path: str):
+        self.after(0, lambda: self._remaining_lbl.configure(text="Loading from Excel…", fg=ACCENT))
         clan_members = self._clan_members
-        def run():
-            names = load_tanks_from_excel(path, clan_members=clan_members)
-            self.after(0, lambda: self._on_remaining_excel(names))
-        threading.Thread(target=run, daemon=True).start()
+        names = await asyncio.to_thread(load_tanks_from_excel, path, clan_members=clan_members)
+        self.after(0, lambda: self._on_remaining_excel(names))
 
     def _on_remaining_excel(self, named_tanks: dict):
         self._member_tanks     = named_tanks
@@ -1142,53 +1228,50 @@ class App(tk.Tk):
         self._refresh_remaining()
 
 
-    def _load_remaining_api(self):
+    async def _load_remaining_api_async(self):
         if not self._cfg.get("clan_tag"):
             return
-        self._remaining_lbl.configure(text="Fetching clan tanks from API…", fg=ACCENT)
-        def run():
-            def progress(msg):
-                self.after(0, lambda m=msg: self._log_msg(f"[tanks] {m}"))
-            realm    = self._cfg.get("realm", "eu")
-            clan_tag = self._cfg["clan_tag"]
-            tier     = self._cfg.get("tier", 10)
+        self.after(0, lambda: self._remaining_lbl.configure(text="Fetching clan tanks from API…", fg=ACCENT))
+        
+        def progress(msg):
+            self.after(0, lambda m=msg: self._log_msg(f"[tanks] {m}"))
+        
+        realm    = self._cfg.get("realm", "eu")
+        clan_tag = self._cfg["clan_tag"]
+        tier     = self._cfg.get("tier", 10)
 
-            progress(f"Looking up clan [{clan_tag}]…")
-            acc_ids = fetch_clan_member_ids(APP_ID, realm, clan_tag)
-            if not acc_ids:
-                msg = f"[!] Could not find clan [{clan_tag}] on {realm.upper()}"
-                self.after(0, lambda m=msg: self._remaining_lbl.configure(text=m, fg=RED))
-                return
+        progress(f"Looking up clan [{clan_tag}]…")
+        acc_ids = await asyncio.to_thread(fetch_clan_member_ids, APP_ID, realm, clan_tag)
+        
+        if not acc_ids:
+            msg = f"[!] Could not find clan [{clan_tag}] on {realm.upper()}"
+            self.after(0, lambda m=msg: self._remaining_lbl.configure(text=m, fg=RED))
+            return
 
-            progress(f"Found {len(acc_ids)} members, fetching tank lists…")
-            # Fetch tanks (returns {id: [tanks]})
-            member_tanks_by_id = fetch_tanks_for_accounts(APP_ID, realm, acc_ids,
-                                                          self._tank_id_to_name, tier, progress)
-            self.after(0, lambda: self._on_remaining_api(member_tanks_by_id, tier))
-        threading.Thread(target=run, daemon=True).start()
+        progress(f"Found {len(acc_ids)} members, fetching tank lists…")
+        member_tanks_by_id = await asyncio.to_thread(fetch_tanks_for_accounts, APP_ID, realm, acc_ids,
+                                                      self._tank_id_to_name, tier, progress)
+        await self._finalize_api_data_async(member_tanks_by_id, tier)
 
-    def _on_remaining_api(self, member_tanks_by_id: dict, tier: int):
+    async def _finalize_api_data_async(self, member_tanks_by_id: dict, tier: int):
         realm = self._cfg.get("realm", "eu")
+        acc_ids = list(member_tanks_by_id.keys())
+        
+        if not acc_ids:
+            self.after(0, lambda: self._on_api_mapped({}, tier))
+            return
 
-        def run_mapping():
-            acc_ids = list(member_tanks_by_id.keys())
-            if not acc_ids:
-                return self.after(0, lambda: self._finalize_api_data({}, tier))
+        id_to_name = await asyncio.to_thread(fetch_account_names, APP_ID, realm, acc_ids)
+        named_tanks = {}
+        for acc_id, tanks in member_tanks_by_id.items():
+            nickname = id_to_name.get(acc_id)
+            if nickname:
+                named_tanks[nickname.lower()] = tanks
+                named_tanks[f"{nickname.lower()}_display"] = nickname
 
-            id_to_name = fetch_account_names(APP_ID, realm, acc_ids)
+        self.after(0, lambda: self._on_api_mapped(named_tanks, tier))
 
-            named_tanks = {}
-            for acc_id, tanks in member_tanks_by_id.items():
-                nickname = id_to_name.get(acc_id)
-                if nickname:
-                    named_tanks[nickname.lower()] = tanks
-                    named_tanks[f"{nickname.lower()}_display"] = nickname
-
-            self.after(0, lambda: self._finalize_api_data(named_tanks, tier))
-
-        threading.Thread(target=run_mapping, daemon=True).start()
-
-    def _finalize_api_data(self, named_tanks, tier):
+    def _on_api_mapped(self, named_tanks, tier):
         self._member_tanks = named_tanks
         self._remaining_tanks = []
         self._remaining_source = "api"
@@ -1297,10 +1380,10 @@ class App(tk.Tk):
             class ReplayHandler(FileSystemEventHandler):
                 def on_created(self, event):
                     if not event.is_directory and event.src_path.endswith(".wotreplay"):
-                        app_ref.after(0, lambda: app_ref._do_scan(silent=True))
+                        app_ref.submit_async(app_ref._do_scan_async(silent=True))
                 def on_modified(self, event):
                     if not event.is_directory and event.src_path.endswith(".wotreplay"):
-                        app_ref.after(0, lambda: app_ref._do_scan(silent=True))
+                        app_ref.submit_async(app_ref._do_scan_async(silent=True))
             self._observer = Observer()
             self._observer.schedule(ReplayHandler(), str(self._replays_dir), recursive=False)
             self._observer.start()
@@ -1315,7 +1398,7 @@ class App(tk.Tk):
                         current = set(self._replays_dir.glob("*.wotreplay"))
                         if current != known:
                             known = current
-                            self.after(0, lambda: self._do_scan(silent=True))
+                            self.submit_async(self._do_scan_async(silent=True))
             self._watcher = threading.Thread(target=poll, daemon=True, name="replay-poll")
             self._watcher.start()
 
@@ -1328,20 +1411,40 @@ class App(tk.Tk):
             self._watcher_stop.set()
             self._watcher = None
 
-    def _do_scan(self, silent: bool = False):
+    async def _do_scan_async(self, silent: bool = False, do_export: bool = True):
         if not self._replays_dir or not self._tag_to_name:
             return
-        def run():
-            new_events, _ = scan_replays(
-                self._replays_dir, self._cfg["clan_tag"],
-                self._tag_to_name, self._already_parsed, self._battle_filter,
-                self._cfg.get("record_since", time.time() - 7200),
-                log_cb=lambda msg: self.after(0, lambda m=msg: self._log_msg(m)),
-            )
-            self.after(0, lambda: self._apply_events(new_events, silent))
-        threading.Thread(target=run, daemon=True).start()
+        
+        # Calculate record_since based on config (handle presets or raw timestamp)
+        preset = self._cfg.get("time_window_preset", "2h")
+        now = time.time()
+        
+        if preset == "2h":
+            record_since = now - 7200
+        elif preset == "4h":
+            record_since = now - 14400
+        elif preset == "8h":
+            record_since = now - 28800
+        elif preset == "24h":
+            record_since = now - 86400
+        elif preset == "today":
+            # 00:00 today
+            lt = time.localtime(now)
+            record_since = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+        else:
+            record_since = self._cfg.get("record_since", now - 7200)
 
-    def _apply_events(self, events: list[dict], silent: bool):
+        # Offload blocking scan to thread
+        new_events, _ = await asyncio.to_thread(
+            scan_replays,
+            self._replays_dir, self._cfg["clan_tag"],
+            self._tag_to_name, self._already_parsed, self._battle_filter,
+            record_since,
+            log_cb=lambda msg: self.after(0, lambda m=msg: self._log_msg(m))
+        )
+        self.after(0, lambda: self._apply_events(new_events, silent, do_export))
+
+    def _apply_events(self, events: list[dict], silent: bool, do_export: bool = True):
         new_count = 0
         for ev in events:
             player      = ev["player"]
@@ -1359,22 +1462,21 @@ class App(tk.Tk):
                     ]
                 existing = [(e[0], e[1], e[2], e[3]) for e in self._destroyed[player]]
                 if (ev["veh_name"], ev["death_label"], ev["map"], ev["battle_time"]) not in existing:
+                    # Queue to Excel/Sheets via the async worker
+                    results_path = self._cfg.get("results_excel_path")
+                    is_exported = False
+                    if results_path and do_export:
+                        # Queue the work
+                        self._loop.call_soon_threadsafe(
+                            self._destruction_queue.put_nowait,
+                            (results_path, player, ev["veh_name"], ev["map"], ev["battle_time"])
+                        )
+                        is_exported = True
+
                     self._destroyed[player].append(
-                        (ev["veh_name"], ev["death_label"], ev["map"], ev["battle_time"], False, replay_name)
+                        (ev["veh_name"], ev["death_label"], ev["map"], ev["battle_time"], False, replay_name, is_exported)
                     )
                     new_count += 1
-                    
-                    # Record to Excel if configured
-                    # Record to Excel if configured
-                    results_path = self._cfg.get("results_excel_path")
-                    if results_path:
-                        # Current squad players for state-aware groups
-                        all_players = [v for k, v in self._member_tanks.items() if str(k).endswith("_display")]
-                        threading.Thread(
-                            target=record_destruction,
-                            args=(results_path, player, ev["veh_name"], ev["map"], ev["battle_time"], all_players),
-                            daemon=True
-                        ).start()
             else:
                 if replay_name not in self._pending_keys:
                     self._pending_keys.add(replay_name)
@@ -1441,8 +1543,48 @@ class App(tk.Tk):
         self._tree.tag_configure("pending", foreground=YELLOW)
 
     def _manual_scan(self):
-        self._log_msg("Manual scan triggered.")
-        self._do_scan(silent=False)
+        self._log_msg("Manual scan triggered (UI update only).")
+        self.submit_async(self._do_scan_async(silent=False, do_export=False))
+
+    def _manual_export(self):
+        self._log_msg("Manual export triggered (Syncing displayed tanks to Excel).")
+        
+        # First, run a fresh scan (silent, no auto-export) to find any new files
+        self.submit_async(self._do_scan_async(silent=False, do_export=False))
+        
+        # Then, after a short delay to let the scan finish, push all unexported results
+        self.after(500, self._push_unexported_results)
+
+    def _push_unexported_results(self):
+        results_path = self._cfg.get("results_excel_path")
+        if not results_path:
+            self._log_msg("[!] No Results Output path configured.")
+            return
+
+        count = 0
+        for player, entries in self._destroyed.items():
+            for i, entry in enumerate(entries):
+                # entry: (tank, death_label, map, battle_time, is_pending, replay_name, exported)
+                tank, _, m, t, is_pending, replay_name = entry[0], entry[1], entry[2], entry[3], entry[4], entry[5]
+                exported = entry[6] if len(entry) > 6 else False
+                
+                if not is_pending and not exported:
+                    # Queue the work
+                    self._loop.call_soon_threadsafe(
+                        self._destruction_queue.put_nowait,
+                        (results_path, player, tank, m, t)
+                    )
+                    # Mark as exported in memory
+                    new_entry = list(entry)
+                    if len(new_entry) < 7: new_entry.append(True)
+                    else: new_entry[6] = True
+                    entries[i] = tuple(new_entry)
+                    count += 1
+        
+        if count > 0:
+            self._log_msg(f"[✓] Queued {count} destructions for export.")
+        else:
+            self._log_msg("[~] Nothing new to export (all tanks already synced).")
 
     def _reset(self):
         if messagebox.askyesno("Reset",
@@ -1463,6 +1605,8 @@ class App(tk.Tk):
 
     def _on_close(self):
         self._stop_watcher()
+        # Cleanly stop the background loop
+        self._loop.call_soon_threadsafe(self._loop.stop)
         sys.stdout = sys.__stdout__
         sys.stderr = sys.__stderr__
         self.destroy()
