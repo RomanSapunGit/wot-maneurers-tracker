@@ -477,8 +477,7 @@ def parse_replay(path: Path) -> tuple[dict | None, dict | None]:
                 return None, None
             try:
                 block1 = json.loads(b1_data)
-            except json.JSONDecodeError as e:
-                print(f"[!] Failed to parse block 1 in {path.name}: {e}", file=sys.stderr)
+            except json.JSONDecodeError:
                 return None, None
             
             block2 = None
@@ -490,9 +489,9 @@ def parse_replay(path: Path) -> tuple[dict | None, dict | None]:
                     if len(b2_data) == block2_size:
                         try:
                             block2 = json.loads(b2_data)
-                        except json.JSONDecodeError as e:
-                            print(f"[!] Failed to parse block 2 in {path.name}: {e}", file=sys.stderr)
+                        except json.JSONDecodeError:
                             # block2 stays None, but we STILL return block1
+                            pass
         return block1, block2
     except Exception as e:
         print(f"[!] Failed to parse replay {path.name}: {e}", file=sys.stderr)
@@ -522,6 +521,7 @@ def scan_replays(replays_dir, clan_tag, tag_to_name, already_parsed, battle_type
         if block1 is None:
             age = time.time() - replay.stat().st_mtime
             if age > INCOMPLETE_GRACE_SECONDS:
+                print(f"[!] Failed to parse {replay.name} (expired)", file=sys.stderr)
                 already_parsed.add(replay.name)
             continue
 
@@ -535,62 +535,60 @@ def scan_replays(replays_dir, clan_tag, tag_to_name, already_parsed, battle_type
             if age <= INCOMPLETE_GRACE_SECONDS:
                 if log_cb:
                     log_cb(f"[~] {replay.name} — in progress, retrying later")
-                # Emit pending event so player shows up immediately
+                # Emit pending event for ALL clan members in this battle
                 battle_time = block1.get("dateTime", "?")
                 map_name    = block1.get("mapDisplayName", block1.get("mapName", "?"))
-                owner       = block1.get("playerName", "")
-                owner_veh   = "?"
-                owner_clan  = ""
+                
                 for sid, veh in block1.get("vehicles", {}).items():
-                    if veh.get("name", "") == owner:
-                        owner_clan = veh.get("clanAbbrev", "")
-                        owner_veh  = veh.get("vehicleType", "?")
-                        break
-                if owner and owner_clan.upper() == clan_tag.upper():
-                    veh_name = resolve_vehicle_name(owner_veh, tag_to_name)
-                    if veh_name:
-                        events.append({
-                            "player":      owner,
-                            "veh_tag":     owner_veh,
-                            "veh_name":    veh_name,
-                            "death_label": "Possibly destroyed",
-                            "battle_time": battle_time,
-                            "map":         map_name,
-                            "pending":     True,
-                            "replay_name": replay.name,
-                        })
+                    p_name = veh.get("name", "")
+                    p_clan = veh.get("clanAbbrev", "")
+                    p_veh  = veh.get("vehicleType", "?")
+                    
+                    if p_name and p_clan.upper() == clan_tag.upper():
+                        veh_name = resolve_vehicle_name(p_veh, tag_to_name)
+                        if veh_name:
+                            events.append({
+                                "player":      p_name,
+                                "veh_tag":     p_veh,
+                                "veh_name":    veh_name,
+                                "death_label": "Possibly destroyed",
+                                "battle_time": battle_time,
+                                "map":         map_name,
+                                "pending":     True,
+                                "replay_name": replay.name,
+                            })
                 continue
 
-            # Old incomplete replay — mark owner as destroyed
+            # Old incomplete replay — mark ALL clan members as destroyed
             already_parsed.add(replay.name)
             battle_time = block1.get("dateTime", "?")
             map_name    = block1.get("mapDisplayName", block1.get("mapName", "?"))
-            owner       = block1.get("playerName", "")
-            owner_clan  = ""
-            owner_veh   = "?"
+            
+            found_any = False
             for sid, veh in block1.get("vehicles", {}).items():
-                if veh.get("name", "") == owner:
-                    owner_clan = veh.get("clanAbbrev", "")
-                    owner_veh  = veh.get("vehicleType", "?")
-                    break
-            if owner and owner_clan.upper() == clan_tag.upper():
-                veh_name = resolve_vehicle_name(owner_veh, tag_to_name)
-                if veh_name:
-                    if log_cb:
-                        log_cb(f"[✗] {replay.name} — left early, marking {owner} destroyed")
-                    events.append({
-                        "player":      owner,
-                        "veh_tag":     owner_veh,
-                        "veh_name":    veh_name,
-                        "death_label": "Destroyed (left battle)",
-                        "battle_time": battle_time,
-                        "map":         map_name,
-                        "pending":     False,
-                        "replay_name": replay.name,
-                    })
-            else:
-                if log_cb:
-                    log_cb(f"[✗] {replay.name} — left early, owner not in clan, skipping")
+                p_name = veh.get("name", "")
+                p_clan = veh.get("clanAbbrev", "")
+                p_veh  = veh.get("vehicleType", "?")
+                
+                if p_name and p_clan.upper() == clan_tag.upper():
+                    veh_name = resolve_vehicle_name(p_veh, tag_to_name)
+                    if veh_name:
+                        found_any = True
+                        events.append({
+                            "player":      p_name,
+                            "veh_tag":     p_veh,
+                            "veh_name":    veh_name,
+                            "death_label": "Destroyed (left battle)",
+                            "battle_time": battle_time,
+                            "map":         map_name,
+                            "pending":     False,
+                            "replay_name": replay.name,
+                        })
+            
+            if not found_any and log_cb:
+                log_cb(f"[✗] {replay.name} — left early, no clan members found, skipping")
+            elif found_any and log_cb:
+                log_cb(f"[✗] {replay.name} — left early, marking clan members destroyed")
             continue
 
         already_parsed.add(replay.name)
@@ -1453,9 +1451,10 @@ class App(tk.Tk):
             self._destroyed.setdefault(player, [])
 
             if not is_pending:
-                # Remove matching pending entry for this replay
-                if replay_name in self._pending_keys:
-                    self._pending_keys.discard(replay_name)
+                # Remove matching pending entry for this replay & player
+                pk = (player, replay_name)
+                if pk in self._pending_keys:
+                    self._pending_keys.discard(pk)
                     self._destroyed[player] = [
                         e for e in self._destroyed[player]
                         if not (len(e) > 4 and e[4] and len(e) > 5 and e[5] == replay_name)
@@ -1478,8 +1477,9 @@ class App(tk.Tk):
                     )
                     new_count += 1
             else:
-                if replay_name not in self._pending_keys:
-                    self._pending_keys.add(replay_name)
+                pk = (player, replay_name)
+                if pk not in self._pending_keys:
+                    self._pending_keys.add(pk)
                     self._destroyed[player].append(
                         (ev["veh_name"], ev["death_label"], ev["map"], ev["battle_time"], True, replay_name)
                     )
