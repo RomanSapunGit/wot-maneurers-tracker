@@ -9,7 +9,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install pyinstaller -r requirements.txt
-      - run: pyinstaller --onefile --windowed --hidden-import=openpyxl --hidden-import=pandas --hidden-import=watchdog.observers.winapi --name "WoTTracker" main1.py
+      - run: pyinstaller --onefile --windowed --hidden-import=openpyxl --hidden-import=pandas --hidden-import=watchdog.observers.winapi --hidden-import=tracker --name "WoTTracker" main1.py
       - uses: actions/upload-artifact@v4
         with:
           name: WoTTracker-windows

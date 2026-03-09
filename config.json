@@ -3,10 +3,10 @@
   "clan_tag": "CRYO",
   "realm": "eu",
   "battle_type_choice": "1",
-  "tier": 10,
+  "tier": 9,
   "excel_path": "https://docs.google.com/spreadsheets/d/15szJUXl3OeW0qUpNyjBEFDKazuWBOf1mdBG6X1pYXXU/edit?gid=1253680866#gid=1253680866",
-  "results_excel_path": "https://script.google.com/macros/s/AKfycbwFeh-ElwUiTC1LgPl3IhXTRd5D_BU6T3fvM8LfoyhO4AdkiDpHbC9msI1vKO1ZfIT7/exec",
+  "results_excel_path": "",
   "players_order": [],
   "record_since": 1772903259.0,
-  "time_window_preset": "2h"
+  "time_window_preset": "8h"
 }
