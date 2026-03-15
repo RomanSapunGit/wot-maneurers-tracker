@@ -36,6 +36,21 @@ from tracker.ui.settings_window import SettingsWindow
 from tracker.server import TankServer
 
 
+CYRILLIC_FALLBACK = {
+    'Об. 260':   'ussr:R100_Object_260',
+    'Об. 277':   'ussr:R149_Object_277',
+    'СТ-ІІ':     'ussr:R159_ST_II',
+    'ИС-4':      'ussr:R10_IS-4M',
+    'Об. 279(р)':'ussr:R152_Object_279_early',
+    'Об. 780':   'ussr:R176_Object_780',
+    'Об. 452К':  'ussr:R178_Object_452K',
+    'ИС-7':      'ussr:R45_IS-7',
+    'Об. 140':   'ussr:R97_Object_140',
+    'Об. 430у':  'ussr:R99_Object_430U',
+    'Об. 907':   'ussr:R148_Object_907',
+    'Об. 268/4':'ussr:R153_Object_268_v4',
+    'Об. 268':   'ussr:R68_Object_268',
+}
 
 class App(tk.Tk):
     def __init__(self):
@@ -291,15 +306,44 @@ class App(tk.Tk):
 
     async def _load_tankopedia_async(self):
         def progress(msg):
-            self.after(0, lambda: self._log_msg(msg))
-            self.after(0, lambda: self._set_status(msg, ACCENT))
+            self.after(0, lambda m=msg: self._set_status(m, ACCENT))
+            self.after(0, lambda m=msg: self._log_msg(f"Tankopedia: {m}"))
+
+        # Fetch all tiers (0) by default to ensure we can map Tier 8/9 tanks 
+        # from Excel/replay even if the UI is currently filtered.
+        fetch_tier = 0
 
         self._tag_to_name, self._tank_id_to_name = await asyncio.to_thread(
             fetch_tag_to_name,
-            APP_ID, self._cfg.get("realm", "eu"), self._cfg.get("tier", 10), progress,
+            APP_ID, self._cfg.get("realm", "eu"), fetch_tier, progress,
         )
-        self._name_to_tag = {v: k for k, v in self._tag_to_name.items()}
+        
+        # Populate mapping with BOTH full names, short names, and tags for better resolution
+        self._name_to_tag = {}
+        for tag, info in self._tag_to_name.items():
+            self._name_to_tag[info["name"]] = tag
+            self._name_to_tag[info["short_name"]] = tag
+            # Also map the raw tag part for direct tag matches (e.g., GB98_T95_FV4201_Chieftain)
+            pure_tag = tag.split(":", 1)[-1]
+            self._name_to_tag[pure_tag] = tag
+            
         self.after(0, self._on_tankopedia_ready)
+
+    def _normalize_tank_name(self, name: str) -> str:
+        """Robust normalization for fuzzy matching (accents, abbreviations)."""
+        if not name: return ""
+        import unicodedata
+        # Normalize to NFD to separate accents, then filter them out
+        s = "".join(c for c in unicodedata.normalize('NFD', str(name)) if unicodedata.category(c) != 'Mn')
+        s = s.lower()
+        # Remove common delimiters
+        for char in " .-/_'\"":
+            s = s.replace(char, "")
+        # Common abbreviations
+        s = s.replace("object", "obj")
+        s = s.replace("pzkpfw", "pz")
+        s = s.replace("panhard", "")
+        return s
 
     def _on_tankopedia_ready(self):
         self._log_msg(f"Tankopedia loaded: {len(self._tag_to_name)} tanks")
@@ -443,11 +487,19 @@ class App(tk.Tk):
         players_order = self._cfg.get("players_order", [])
         if not players_order:
             if self._remaining_source in ("api", "excel"):
-                players_order = sorted([
+                players_order = [
                     v for k, v in self._member_tanks.items() if str(k).endswith("_display")
-                ])
+                ]
             else:
-                players_order = sorted(self._destroyed.keys())
+                players_order = list(self._destroyed.keys())
+        
+        # Filter out anything that looks like a tank name to prevent pollution
+        valid_players = []
+        tank_names_lower = {n.lower() for n in self._name_to_tag.keys()}
+        for p in players_order:
+            if str(p).lower().strip() not in tank_names_lower:
+                valid_players.append(p)
+        players_order = sorted(valid_players)
 
         for player_input in players_order:
             p_low = player_input.lower().strip()
@@ -513,14 +565,28 @@ class App(tk.Tk):
 
     def _get_tanks_for_server(self, account_id: int) -> list[str]:
         """Server callback: returns non-destroyed tank tags for the given account_id."""
+        self._log_msg(f"[server] Request for account_id={account_id}")
+        
         nickname = self._acc_id_to_name.get(account_id)
         if not nickname:
+            # Fallback: try to fetch nickname directly if not in clan list
+            try:
+                realm = self._cfg.get("realm", "eu")
+                res = fetch_account_names(APP_ID, realm, [account_id])
+                if account_id in res:
+                    nickname = res[account_id]
+                    self._acc_id_to_name[account_id] = nickname
+                    self._log_msg(f"[server] Fetched missing nickname for ID {account_id}: '{nickname}'")
+            except Exception as e:
+                self._log_msg(f"[server] Failed to fetch name for ID {account_id}: {e}")
+
+        if not nickname:
+            self._log_msg(f"[server] No nickname found for ID {account_id}")
             return []
 
+        self._log_msg(f"[server] Resolved ID {account_id} to nickname '{nickname}'")
         p_low = nickname.lower().strip()
         if p_low not in self._member_tanks:
-            # Maybe the player is in our app via Excel but not in the cached clan list?
-            # We try to find them by matching nicknames if we have any Excel display names.
             found = False
             for k, v in self._member_tanks.items():
                 if k.endswith("_display"):
@@ -528,17 +594,62 @@ class App(tk.Tk):
                     if disp == p_low:
                         p_low = k.replace("_display", "")
                         found = True
+                        self._log_msg(f"[server] Found match for '{nickname}' via display name")
                         break
             if not found:
+                self._log_msg(f"[server] Player '{nickname}' not found in any tank list")
                 return []
 
         all_tanks = self._member_tanks.get(p_low, [])
+        self._log_msg(f"[server] Total tanks found for '{nickname}': {len(all_tanks)}")
         
-        # Build set of destroyed tanks for this player (lowercased display names)
-        dead_names_lower = set()
-        # Look in self._destroyed using various possible nickname formats
+        # Build set of destroyed tanks for this player (normalized names)
+        dead_names_norm = {self._normalize_tank_name(d) for d in self._get_dead_names(nickname, p_low)}
+
+        remaining_tags = []
+        # Pre-normalize the mapping keys for faster fuzzy lookup
+        norm_map = {self._normalize_tank_name(n): tg for n, tg in self._name_to_tag.items() if n}
+
+        for t_display in all_tanks:
+            norm_t = self._normalize_tank_name(t_display)
+            if norm_t not in dead_names_norm:
+                tag = self._name_to_tag.get(t_display)
+                
+                if not tag:
+                    # Try normalized direct match
+                    tag = norm_map.get(norm_t)
+
+                if not tag:
+                    # Substring check 
+                    for n_norm, tg in norm_map.items():
+                        if norm_t and n_norm and (norm_t in n_norm or n_norm in norm_t):
+                            tag = tg
+                            break
+
+                if tag:
+                    remaining_tags.append(tag)
+                else:
+                    tag = CYRILLIC_FALLBACK.get(t_display)
+                    if tag:
+                        self._log_msg(f"[server] Resolved via Cyrillic fallback: '{t_display}' -> '{tag}'")
+                    else:
+                        self._log_msg(f"[server] Failed to map tank name to tag: '{t_display}'")
+        
+        # Use a list for the final response as requested, but ensure uniqueness
+        unique_tags = []
+        seen = set()
+        for tag in remaining_tags:
+            if tag not in seen:
+                unique_tags.append(tag)
+                seen.add(tag)
+        
+        self._log_msg(f"[server] Returning {len(unique_tags)} unique tank(s) for '{nickname}'")
+        return unique_tags
+
+    def _get_dead_names(self, nickname: str, p_low: str) -> set[str]:
+        """Helper to get list of destroyed tank names for various possible keys."""
+        dead = set()
         possible_keys = {nickname, p_low}
-        # Add the display name if available
         display_name = self._member_tanks.get(f"{p_low}_display")
         if display_name:
             possible_keys.add(display_name)
@@ -548,37 +659,8 @@ class App(tk.Tk):
             for e in entries:
                 is_pending = e[4] if len(e) > 4 else False
                 if not is_pending:
-                    dead_names_lower.add(e[0].lower().strip())
-
-        remaining_tags = []
-        for t_display in all_tanks:
-            t_low_disp = t_display.lower().strip()
-            if t_low_disp not in dead_names_lower:
-                tag = self._name_to_tag.get(t_display)
-                
-                # Robust matching if exact fails
-                if not tag:
-                    # 1. Case-insensitive match
-                    for name, tg in self._name_to_tag.items():
-                        if name.lower().strip() == t_low_disp:
-                            tag = tg
-                            break
-                
-                if not tag:
-                    # 2. Substring match (e.g., "Chieftain" in "T95/FV4201 Chieftain")
-                    # Or vice-versa (e.g., "AMX 50 B" matching "AMX 50 B")
-                    for name, tg in self._name_to_tag.items():
-                        n_low = name.lower().strip()
-                        if t_low_disp in n_low or n_low in t_low_disp:
-                            tag = tg
-                            break
-
-                if tag:
-                    remaining_tags.append(tag)
-                else:
-                    self._log_msg(f"[server] Failed to map tank name to tag: '{t_display}'")
-        
-        return remaining_tags
+                    dead.add(str(e[0]))
+        return dead
 
     # ── watcher ─────────────────────────────────────────────────────────────────
 
@@ -733,11 +815,19 @@ class App(tk.Tk):
         players_order = self._cfg.get("players_order", [])
         if not players_order:
             if self._remaining_source in ("api", "excel"):
-                players_order = sorted([
+                players_order = [
                     v for k, v in self._member_tanks.items() if str(k).endswith("_display")
-                ])
+                ]
             else:
-                players_order = sorted(self._destroyed.keys())
+                players_order = list(self._destroyed.keys())
+        
+        # Filter out anything that looks like a tank name
+        valid_players = []
+        tank_names_lower = {n.lower() for n in self._name_to_tag.keys()}
+        for p in players_order:
+            if str(p).lower().strip() not in tank_names_lower:
+                valid_players.append(p)
+        players_order = sorted(valid_players)
 
         player_destroyed_lower = {
             k.lower().strip(): (k, v) for k, v in self._destroyed.items()

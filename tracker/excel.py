@@ -157,30 +157,42 @@ def record_destruction(
 
 def load_tanks_from_excel(
     path: str,
-    clan_members: set[str] = None,
+    clan_members: set[str] | None = None,
 ) -> dict[str, list[str] | str]:
     """
     Reads tank names from columns of an Excel file or URL.
     Assigns each column to a player (first non-numeric row is player name, rest are tanks).
     """
     result: dict[str, list[str] | str] = {}
-    normalized_members = {m.lower() for m in clan_members} if clan_members else None
+    normalized_members = {m.lower() for m in clan_members} if clan_members is not None else None
 
     def _process_cells(cells):
         name = None
         tanks = []
         for cell in cells:
+            s_cell = str(cell).strip()
+            if not s_cell:
+                continue
             if not name:
-                if cell.isdigit() and len(cell) <= 3:
-                    continue
-                name = cell.replace("⭐", "").strip()
+                # Skip if it looks like a number (tier/count)
+                try:
+                    float_val = float(s_cell.replace(",", "."))
+                    if float_val < 1000: # Heuristic: account IDs are usually larger
+                        continue
+                except ValueError:
+                    pass
+                
+                name = s_cell.replace("⭐", "").strip()
             else:
-                t = cell.replace("⭐", "").strip()
+                t = s_cell.replace("⭐", "").strip()
                 if t:
                     tanks.append(t)
+        
         if name:
-            if normalized_members is not None and name.lower() not in normalized_members:
-                return
+            # Only filter if clan_members was explicitly provided (even if empty)
+            if clan_members is not None:
+                if name.lower() not in normalized_members:
+                    return
             result[name.lower()] = tanks
             result[f"{name.lower()}_display"] = name
 
