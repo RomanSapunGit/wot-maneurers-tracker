@@ -14,19 +14,20 @@ def fetch_tag_to_name(
     realm: str,
     tier: int = 10,
     progress_cb=None,
-) -> tuple[dict[str, str], dict[int, str]]:
+) -> tuple[dict[str, dict], dict[int, str]]:
     """
     Fetches all vehicles (optionally filtered by tier) from the WoT encyclopedia.
-    Returns (tag_to_name, tank_id_to_name).
+    Returns (tag_to_info_dict, tank_id_to_name).
+    tag_to_info_dict format: { 'tag': {'name': str, 'short_name': str} }
     """
     base_url = REALM_URLS.get(realm.lower(), REALM_URLS["eu"])
-    tag_to_name: dict[str, str] = {}
+    tag_to_name: dict[str, dict] = {}
     tank_id_to_name: dict[int, str] = {}
     page = 1
     while True:
         enc = {
             "application_id": app_id,
-            "fields": "tag,name,tank_id",
+            "fields": "tag,name,short_name,tank_id,nation",
             "page_no": page,
             "limit": 100,
         }
@@ -47,7 +48,12 @@ def fetch_tag_to_name(
             break
         for _, info in data["data"].items():
             if isinstance(info, dict) and "tag" in info and "name" in info:
-                tag_to_name[info["tag"]] = info["name"]
+                nation = info.get("nation", "unknown")
+                full_tag = f"{nation}:{info['tag']}"
+                tag_to_name[full_tag] = {
+                    "name": info["name"],
+                    "short_name": info.get("short_name", info["name"])
+                }
                 if "tank_id" in info:
                     tank_id_to_name[info["tank_id"]] = info["name"]
         meta = data.get("meta", {})
@@ -60,6 +66,10 @@ def fetch_tag_to_name(
     return tag_to_name, tank_id_to_name
 
 
-def resolve_vehicle_name(vehicle_type: str, tag_to_name: dict[str, str]) -> str | None:
+def resolve_vehicle_name(vehicle_type: str, tag_to_name: dict[str, dict]) -> str | None:
     tag = vehicle_type.split(":", 1)[-1]
-    return tag_to_name.get(tag)
+    # We need to find the tag in the dict keys
+    for full_tag, info in tag_to_name.items():
+        if full_tag.endswith(":" + tag) or full_tag == tag:
+            return info["name"]
+    return None

@@ -33,6 +33,8 @@ from tracker.replay_parser import scan_replays
 from tracker.excel import record_destruction, load_tanks_from_excel, _is_url
 from tracker.ui.log_redirector import LogRedirector
 from tracker.ui.settings_window import SettingsWindow
+from tracker.server import TankServer
+
 
 
 class App(tk.Tk):
@@ -46,6 +48,8 @@ class App(tk.Tk):
         self._cfg              = load_config()
         self._tag_to_name:     dict[str, str]         = {}
         self._tank_id_to_name: dict[int, str]         = {}
+        self._name_to_tag:     dict[str, str]         = {}
+        self._acc_id_to_name:  dict[int, str]         = {}
         self._already_parsed:  set[str]               = set()
         self._destroyed:       dict[str, list]        = {}
         self._battle_filter:   list[int] | None       = [20]
@@ -60,6 +64,8 @@ class App(tk.Tk):
         self._member_tanks:     dict[str, list[str]] = {}   # api mode: player→[tanks]
         self._remaining_source: str                  = ""   # "excel" | "api" | ""
         self._clan_members:     set[str]             = set()
+        self._server:           TankServer           = TankServer(port=8082, get_tanks_cb=self._get_tanks_for_server)
+
 
         # Asyncio infrastructure
         self._loop = asyncio.new_event_loop()
@@ -67,7 +73,9 @@ class App(tk.Tk):
         self._async_thread = threading.Thread(target=self._run_async_loop, daemon=True)
         self._async_thread.start()
 
+        self._server.start()
         self._build_ui()
+
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         if not self._cfg.get("replays_path") or not self._cfg.get("clan_tag"):
@@ -290,6 +298,7 @@ class App(tk.Tk):
             fetch_tag_to_name,
             APP_ID, self._cfg.get("realm", "eu"), self._cfg.get("tier", 10), progress,
         )
+        self._name_to_tag = {v: k for k, v in self._tag_to_name.items()}
         self.after(0, self._on_tankopedia_ready)
 
     def _on_tankopedia_ready(self):
@@ -307,6 +316,7 @@ class App(tk.Tk):
                 fetch_account_names, APP_ID, cfg.get("realm", "eu"), member_ids
             )
             self._clan_members = set(names_dict.values())
+            self._acc_id_to_name.update(names_dict)
             self.after(0, lambda: self._log_msg(
                 f"Clan members fetched: {len(self._clan_members)} members"))
         else:
@@ -501,6 +511,75 @@ class App(tk.Tk):
         self._rem_tree.tag_configure("group_header", foreground=GREEN)
         self._rem_tree.tag_configure("group_dead", foreground=RED)
 
+    def _get_tanks_for_server(self, account_id: int) -> list[str]:
+        """Server callback: returns non-destroyed tank tags for the given account_id."""
+        nickname = self._acc_id_to_name.get(account_id)
+        if not nickname:
+            return []
+
+        p_low = nickname.lower().strip()
+        if p_low not in self._member_tanks:
+            # Maybe the player is in our app via Excel but not in the cached clan list?
+            # We try to find them by matching nicknames if we have any Excel display names.
+            found = False
+            for k, v in self._member_tanks.items():
+                if k.endswith("_display"):
+                    disp = str(v).lower().strip()
+                    if disp == p_low:
+                        p_low = k.replace("_display", "")
+                        found = True
+                        break
+            if not found:
+                return []
+
+        all_tanks = self._member_tanks.get(p_low, [])
+        
+        # Build set of destroyed tanks for this player (lowercased display names)
+        dead_names_lower = set()
+        # Look in self._destroyed using various possible nickname formats
+        possible_keys = {nickname, p_low}
+        # Add the display name if available
+        display_name = self._member_tanks.get(f"{p_low}_display")
+        if display_name:
+            possible_keys.add(display_name)
+            
+        for key in possible_keys:
+            entries = self._destroyed.get(key, [])
+            for e in entries:
+                is_pending = e[4] if len(e) > 4 else False
+                if not is_pending:
+                    dead_names_lower.add(e[0].lower().strip())
+
+        remaining_tags = []
+        for t_display in all_tanks:
+            t_low_disp = t_display.lower().strip()
+            if t_low_disp not in dead_names_lower:
+                tag = self._name_to_tag.get(t_display)
+                
+                # Robust matching if exact fails
+                if not tag:
+                    # 1. Case-insensitive match
+                    for name, tg in self._name_to_tag.items():
+                        if name.lower().strip() == t_low_disp:
+                            tag = tg
+                            break
+                
+                if not tag:
+                    # 2. Substring match (e.g., "Chieftain" in "T95/FV4201 Chieftain")
+                    # Or vice-versa (e.g., "AMX 50 B" matching "AMX 50 B")
+                    for name, tg in self._name_to_tag.items():
+                        n_low = name.lower().strip()
+                        if t_low_disp in n_low or n_low in t_low_disp:
+                            tag = tg
+                            break
+
+                if tag:
+                    remaining_tags.append(tag)
+                else:
+                    self._log_msg(f"[server] Failed to map tank name to tag: '{t_display}'")
+        
+        return remaining_tags
+
     # ── watcher ─────────────────────────────────────────────────────────────────
 
     def _start_watcher(self):
@@ -581,6 +660,20 @@ class App(tk.Tk):
         self.after(0, lambda: self._apply_events(new_events, silent, do_export))
 
     def _apply_events(self, events: list[dict], silent: bool, do_export: bool = True):
+        players_order = self._cfg.get("players_order", [])
+        order_dict = {p.lower().strip(): i for i, p in enumerate(players_order)}
+
+        def get_priority(p_name: str) -> int:
+            p_low = p_name.lower().strip()
+            if p_low in order_dict:
+                return order_dict[p_low]
+            for o_name, idx in order_dict.items():
+                if p_low in o_name or o_name in p_low:
+                    return idx
+            return len(players_order) + 1
+
+        events.sort(key=lambda ev: (get_priority(ev["player"]), ev.get("battle_time", "")))
+
         new_count = 0
         for ev in events:
             player      = ev["player"]
@@ -702,8 +795,23 @@ class App(tk.Tk):
             self._log_msg("[!] No Results Output path configured.")
             return
 
+        players_order = self._cfg.get("players_order", [])
+        order_dict = {p.lower().strip(): i for i, p in enumerate(players_order)}
+
+        def get_priority(p_name: str) -> int:
+            p_low = p_name.lower().strip()
+            if p_low in order_dict:
+                return order_dict[p_low]
+            for o_name, idx in order_dict.items():
+                if p_low in o_name or o_name in p_low:
+                    return idx
+            return len(players_order) + 1
+
+        sorted_players = sorted(self._destroyed.keys(), key=get_priority)
+
         count = 0
-        for player, entries in self._destroyed.items():
+        for player in sorted_players:
+            entries = self._destroyed[player]
             for i, entry in enumerate(entries):
                 tank, _, m, t, is_pending, replay_name = (
                     entry[0], entry[1], entry[2], entry[3], entry[4], entry[5])
@@ -751,7 +859,9 @@ class App(tk.Tk):
 
     def _on_close(self):
         self._stop_watcher()
+        self._server.stop()
         self._loop.call_soon_threadsafe(self._loop.stop)
+
         sys.stdout = sys.__stdout__
         sys.stderr = sys.__stderr__
         self.destroy()

@@ -8,6 +8,7 @@ All application logic lives in the `tracker` package:
   tracker/wot_api.py            — WoT clan/account API helpers
   tracker/replay_parser.py      — .wotreplay parsing & scanning
   tracker/excel.py              — Excel/URL I/O for destructions & tank lists
+  tracker/server - server where we send tanks by id
   tracker/ui/log_redirector.py  — stdout/stderr → tkinter Text widget
   tracker/ui/settings_window.py — Settings dialog
   tracker/ui/app.py             — Main application window (App)
