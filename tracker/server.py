@@ -4,19 +4,6 @@ import json
 import threading
 import sys
 
-def get_tanks_for_player(account_id):
-    """
-    Given a WoT account_id (int), return a list of WoT internal tank name strings.
-    """
-    # Example stub — replace with real logic if needed in the future
-    print(f'[server] Request for account_id={account_id}')
- 
-    # Hardcoded test response as requested:
-    return [
-        'uk:GB98_T95_FV4201_Chieftain',
-        'ussr:R97_Object_140',
-        'germany:G56_E-100',
-    ]
 
 class TankRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -49,10 +36,7 @@ class TankRequestHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*') # Add CORS just in case
         self.end_headers()
         self.wfile.write(body)
- 
-    def log_message(self, format, *args):
-        # Redirect log messages to stdout so they can be captured by the UI log redirector
-        print('[server] ' + format % args)
+
 
 class TankServer:
     def __init__(self, host='localhost', port=8082, get_tanks_cb=None):

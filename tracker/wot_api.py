@@ -60,7 +60,7 @@ def fetch_tanks_for_accounts(
     app_id: str,
     realm: str,
     account_ids: list[int],
-    tank_id_to_name: dict[int, str],
+    tank_id_to_name: dict[int, dict],
     tier: int,
     progress_cb=None,
 ) -> dict[int, list[str]]:
@@ -86,11 +86,14 @@ def fetch_tanks_for_accounts(
                     acc_id = int(acc_id_str)
                     if not tanks:
                         continue
-                    owned_names = [
-                        tank_id_to_name[t["tank_id"]]
-                        for t in tanks
-                        if t.get("tank_id") in valid_ids
-                    ]
+                    owned_names = []
+                    for t in tanks:
+                        tid = t.get("tank_id")
+                        if tid in valid_ids:
+                            t_info = tank_id_to_name[tid]
+                            if tier and tier > 0 and t_info.get("tier", 0) != tier:
+                                continue
+                            owned_names.append(t_info["name"])
                     if owned_names:
                         result[acc_id] = sorted(owned_names)
 

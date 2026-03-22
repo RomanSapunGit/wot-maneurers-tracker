@@ -61,8 +61,8 @@ class App(tk.Tk):
         self.minsize(700, 500)
 
         self._cfg              = load_config()
-        self._tag_to_name:     dict[str, str]         = {}
-        self._tank_id_to_name: dict[int, str]         = {}
+        self._tag_to_name:     dict[str, dict]        = {}
+        self._tank_id_to_name: dict[int, dict]        = {}
         self._name_to_tag:     dict[str, str]         = {}
         self._acc_id_to_name:  dict[int, str]         = {}
         self._already_parsed:  set[str]               = set()
@@ -564,87 +564,64 @@ class App(tk.Tk):
         self._rem_tree.tag_configure("group_dead", foreground=RED)
 
     def _get_tanks_for_server(self, account_id: int) -> list[str]:
-        """Server callback: returns non-destroyed tank tags for the given account_id."""
+        """Server callback: returns non-destroyed tank internal tags for the given account_id."""
         self._log_msg(f"[server] Request for account_id={account_id}")
-        
+
         nickname = self._acc_id_to_name.get(account_id)
         if not nickname:
-            # Fallback: try to fetch nickname directly if not in clan list
             try:
                 realm = self._cfg.get("realm", "eu")
                 res = fetch_account_names(APP_ID, realm, [account_id])
                 if account_id in res:
                     nickname = res[account_id]
                     self._acc_id_to_name[account_id] = nickname
-                    self._log_msg(f"[server] Fetched missing nickname for ID {account_id}: '{nickname}'")
             except Exception as e:
                 self._log_msg(f"[server] Failed to fetch name for ID {account_id}: {e}")
 
         if not nickname:
-            self._log_msg(f"[server] No nickname found for ID {account_id}")
             return []
 
-        self._log_msg(f"[server] Resolved ID {account_id} to nickname '{nickname}'")
         p_low = nickname.lower().strip()
         if p_low not in self._member_tanks:
             found = False
             for k, v in self._member_tanks.items():
                 if k.endswith("_display"):
-                    disp = str(v).lower().strip()
-                    if disp == p_low:
+                    if str(v).lower().strip() == p_low:
                         p_low = k.replace("_display", "")
                         found = True
-                        self._log_msg(f"[server] Found match for '{nickname}' via display name")
                         break
             if not found:
-                self._log_msg(f"[server] Player '{nickname}' not found in any tank list")
                 return []
 
         all_tanks = self._member_tanks.get(p_low, [])
-        self._log_msg(f"[server] Total tanks found for '{nickname}': {len(all_tanks)}")
-        
-        # Build set of destroyed tanks for this player (normalized names)
         dead_names_norm = {self._normalize_tank_name(d) for d in self._get_dead_names(nickname, p_low)}
-
-        remaining_tags = []
-        # Pre-normalize the mapping keys for faster fuzzy lookup
         norm_map = {self._normalize_tank_name(n): tg for n, tg in self._name_to_tag.items() if n}
 
+        result = []
+        seen = set()
         for t_display in all_tanks:
             norm_t = self._normalize_tank_name(t_display)
-            if norm_t not in dead_names_norm:
-                tag = self._name_to_tag.get(t_display)
-                
-                if not tag:
-                    # Try normalized direct match
-                    tag = norm_map.get(norm_t)
+            if norm_t in dead_names_norm:
+                continue
 
-                if not tag:
-                    # Substring check 
-                    for n_norm, tg in norm_map.items():
-                        if norm_t and n_norm and (norm_t in n_norm or n_norm in norm_t):
-                            tag = tg
-                            break
+            # Resolve display name to internal tag
+            tag = self._name_to_tag.get(t_display) or norm_map.get(norm_t)
+            if not tag:
+                for n_norm, tg in norm_map.items():
+                    if norm_t and n_norm and (norm_t in n_norm or n_norm in norm_t):
+                        tag = tg
+                        break
+            if not tag:
+                tag = CYRILLIC_FALLBACK.get(t_display)
 
-                if tag:
-                    remaining_tags.append(tag)
-                else:
-                    tag = CYRILLIC_FALLBACK.get(t_display)
-                    if tag:
-                        self._log_msg(f"[server] Resolved via Cyrillic fallback: '{t_display}' -> '{tag}'")
-                    else:
-                        self._log_msg(f"[server] Failed to map tank name to tag: '{t_display}'")
-        
-        # Use a list for the final response as requested, but ensure uniqueness
-        unique_tags = []
-        seen = set()
-        for tag in remaining_tags:
-            if tag not in seen:
-                unique_tags.append(tag)
+            if tag and tag not in seen:
+                result.append(tag)
                 seen.add(tag)
-        
-        self._log_msg(f"[server] Returning {len(unique_tags)} unique tank(s) for '{nickname}'")
-        return unique_tags
+            elif not tag:
+                self._log_msg(f"[server] Could not resolve tag for: '{t_display}'")
+
+        self._log_msg(f"[server] Returning {len(result)} tank(s) for '{nickname}'")
+        return result
 
     def _get_dead_names(self, nickname: str, p_low: str) -> set[str]:
         """Helper to get list of destroyed tank names for various possible keys."""

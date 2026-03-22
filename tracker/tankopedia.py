@@ -14,7 +14,7 @@ def fetch_tag_to_name(
     realm: str,
     tier: int = 10,
     progress_cb=None,
-) -> tuple[dict[str, dict], dict[int, str]]:
+) -> tuple[dict[str, dict], dict[int, dict]]:
     """
     Fetches all vehicles (optionally filtered by tier) from the WoT encyclopedia.
     Returns (tag_to_info_dict, tank_id_to_name).
@@ -22,12 +22,12 @@ def fetch_tag_to_name(
     """
     base_url = REALM_URLS.get(realm.lower(), REALM_URLS["eu"])
     tag_to_name: dict[str, dict] = {}
-    tank_id_to_name: dict[int, str] = {}
+    tank_id_to_name: dict[int, dict] = {}
     page = 1
     while True:
         enc = {
             "application_id": app_id,
-            "fields": "tag,name,short_name,tank_id,nation",
+            "fields": "tag,name,short_name,tank_id,nation,tier",
             "page_no": page,
             "limit": 100,
         }
@@ -55,7 +55,10 @@ def fetch_tag_to_name(
                     "short_name": info.get("short_name", info["name"])
                 }
                 if "tank_id" in info:
-                    tank_id_to_name[info["tank_id"]] = info["name"]
+                    tank_id_to_name[info["tank_id"]] = {
+                        "name": info["name"],
+                        "tier": info.get("tier", 0)
+                    }
         meta = data.get("meta", {})
         total_pages = meta.get("page_total", 1)
         if progress_cb:
