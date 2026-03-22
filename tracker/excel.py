@@ -52,6 +52,16 @@ def _normalize_excel_url(url: str) -> str:
 
 # ── destruction recording ──────────────────────────────────────────────────────
 
+def _normalize_tank_name(name: str) -> str:
+    if not name: return ""
+    import unicodedata
+    s = "".join(c for c in unicodedata.normalize('NFD', str(name)) if unicodedata.category(c) != 'Mn')
+    s = s.lower()
+    for char in " .-/_'\"":
+        s = s.replace(char, "")
+    s = s.replace("object", "obj").replace("pzkpfw", "pz").replace("panhard", "")
+    return s
+
 def record_destruction(
     path: str,
     player: str,
@@ -119,12 +129,15 @@ def record_destruction(
                     # 3. Find tank in this player's list or find first empty row
                     row = 2
                     found_row = -1
+                    tank_norm = _normalize_tank_name(tank)
                     while True:
                         t_val = ws.cell(row=row, column=target_col).value
                         if not t_val:
                             found_row = row
                             break
-                        if str(t_val).strip().lower() == tank.strip().lower():
+                        
+                        t_val_norm = _normalize_tank_name(str(t_val))
+                        if t_val_norm == tank_norm or (t_val_norm and tank_norm and (t_val_norm in tank_norm or tank_norm in t_val_norm)):
                             found_row = row
                             break
                         row += 1

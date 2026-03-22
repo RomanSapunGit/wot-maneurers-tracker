@@ -52,7 +52,8 @@ def fetch_tag_to_name(
                 full_tag = f"{nation}:{info['tag']}"
                 tag_to_name[full_tag] = {
                     "name": info["name"],
-                    "short_name": info.get("short_name", info["name"])
+                    "short_name": info.get("short_name", info["name"]),
+                    "tier": info.get("tier", 0)
                 }
                 if "tank_id" in info:
                     tank_id_to_name[info["tank_id"]] = {
@@ -69,10 +70,10 @@ def fetch_tag_to_name(
     return tag_to_name, tank_id_to_name
 
 
-def resolve_vehicle_name(vehicle_type: str, tag_to_name: dict[str, dict]) -> str | None:
+def resolve_vehicle_info(vehicle_type: str, tag_to_name: dict[str, dict]) -> dict | None:
     tag = vehicle_type.split(":", 1)[-1]
     # We need to find the tag in the dict keys
     for full_tag, info in tag_to_name.items():
         if full_tag.endswith(":" + tag) or full_tag == tag:
-            return info["name"]
+            return info
     return None

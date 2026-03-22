@@ -512,19 +512,31 @@ class App(tk.Tk):
                 display_name = player_input
 
             dead_names       = player_destroyed.get(p_low, set())
-            dead_names_lower = {d.lower() for d in dead_names}
+            dead_names_norm  = {self._normalize_tank_name(d): d for d in dead_names}
 
             available = []
             destroyed = []
             for t in all_tanks:
-                if t.lower().strip() in dead_names_lower:
+                t_norm = self._normalize_tank_name(t)
+                matched_dead = False
+                for d_norm in dead_names_norm:
+                    if t_norm == d_norm or (t_norm and d_norm and (t_norm in d_norm or d_norm in t_norm)):
+                        matched_dead = True
+                        break
+                if matched_dead:
                     destroyed.append(t)
                 else:
                     available.append(t)
 
-            all_tanks_lower = {t.lower().strip() for t in all_tanks}
+            all_tanks_norm = {self._normalize_tank_name(t): t for t in all_tanks}
             for d in dead_names:
-                if d.lower().strip() not in all_tanks_lower:
+                d_norm = self._normalize_tank_name(d)
+                matched_all = False
+                for t_norm in all_tanks_norm:
+                    if t_norm == d_norm or (t_norm and d_norm and (t_norm in d_norm or d_norm in t_norm)):
+                        matched_all = True
+                        break
+                if not matched_all:
                     destroyed.append(d)
 
             available.sort()
@@ -615,7 +627,10 @@ class App(tk.Tk):
                 tag = CYRILLIC_FALLBACK.get(t_display)
 
             if tag and tag not in seen:
-                result.append(tag)
+                display_name = tag
+                if tag in self._tag_to_name:
+                    display_name = self._tag_to_name[tag].get("short_name", self._tag_to_name[tag].get("name", tag))
+                result.append(display_name)
                 seen.add(tag)
             elif not tag:
                 self._log_msg(f"[server] Could not resolve tag for: '{t_display}'")
@@ -715,6 +730,7 @@ class App(tk.Tk):
             self._tag_to_name, self._already_parsed, self._battle_filter,
             record_since,
             log_cb=lambda msg: self.after(0, lambda m=msg: self._log_msg(m)),
+            tier_filter=self._cfg.get("tier", 10),
         )
         self.after(0, lambda: self._apply_events(new_events, silent, do_export))
 

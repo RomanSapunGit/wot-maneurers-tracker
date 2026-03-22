@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from .constants import INCOMPLETE_GRACE_SECONDS
-from .tankopedia import resolve_vehicle_name
+from .tankopedia import resolve_vehicle_info
 
 
 def parse_replay(path: Path) -> tuple[dict | None, dict | None]:
@@ -59,6 +59,7 @@ def scan_replays(
     battle_type_filter,
     record_since=0,
     log_cb=None,
+    tier_filter=0,
 ):
     events = []
     replays = sorted(replays_dir.glob("*.wotreplay"), key=lambda f: f.stat().st_mtime)
@@ -100,12 +101,14 @@ def scan_replays(
                     p_veh  = veh.get("vehicleType", "?")
 
                     if p_name and p_clan.upper() == clan_tag.upper():
-                        veh_name = resolve_vehicle_name(p_veh, tag_to_name)
-                        if veh_name:
+                        veh_info = resolve_vehicle_info(p_veh, tag_to_name)
+                        if veh_info:
+                            if tier_filter > 0 and veh_info.get("tier", 0) != tier_filter:
+                                continue
                             events.append({
                                 "player":      p_name,
                                 "veh_tag":     p_veh,
-                                "veh_name":    veh_name,
+                                "veh_name":    veh_info["name"],
                                 "death_label": "Possibly destroyed",
                                 "battle_time": battle_time,
                                 "map":         map_name,
@@ -126,13 +129,15 @@ def scan_replays(
                 p_veh  = veh.get("vehicleType", "?")
 
                 if p_name and p_clan.upper() == clan_tag.upper():
-                    veh_name = resolve_vehicle_name(p_veh, tag_to_name)
-                    if veh_name:
+                    veh_info = resolve_vehicle_info(p_veh, tag_to_name)
+                    if veh_info:
+                        if tier_filter > 0 and veh_info.get("tier", 0) != tier_filter:
+                            continue
                         found_any = True
                         events.append({
                             "player":      p_name,
                             "veh_tag":     p_veh,
-                            "veh_name":    veh_name,
+                            "veh_name":    veh_info["name"],
                             "death_label": "Destroyed (left battle)",
                             "battle_time": battle_time,
                             "map":         map_name,
@@ -205,13 +210,15 @@ def scan_replays(
             if death_reason == -1:
                 continue
 
-            veh_name = resolve_vehicle_name(info["veh_tag"], tag_to_name)
-            if veh_name is None:
+            veh_info = resolve_vehicle_info(info["veh_tag"], tag_to_name)
+            if not veh_info:
+                continue
+            if tier_filter > 0 and veh_info.get("tier", 0) != tier_filter:
                 continue
             events.append({
                 "player":      info["name"],
                 "veh_tag":     info["veh_tag"],
-                "veh_name":    veh_name,
+                "veh_name":    veh_info["name"],
                 "death_label": get_death_label(death_reason),
                 "battle_time": battle_time,
                 "map":         map_name,
