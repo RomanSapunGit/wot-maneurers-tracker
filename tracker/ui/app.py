@@ -575,8 +575,8 @@ class App(tk.Tk):
         self._rem_tree.tag_configure("group_header", foreground=GREEN)
         self._rem_tree.tag_configure("group_dead", foreground=RED)
 
-    def _get_tanks_for_server(self, account_id: int) -> list[str]:
-        """Server callback: returns non-destroyed tank internal tags for the given account_id."""
+    def _get_tanks_for_server(self, account_id: int) -> list[dict]:
+        """Server callback: returns tank technical tags and status for the given account_id."""
         self._log_msg(f"[server] Request for account_id={account_id}")
 
         nickname = self._acc_id_to_name.get(account_id)
@@ -610,11 +610,10 @@ class App(tk.Tk):
         norm_map = {self._normalize_tank_name(n): tg for n, tg in self._name_to_tag.items() if n}
 
         result = []
-        seen = set()
+        seen_tags = set()
         for t_display in all_tanks:
             norm_t = self._normalize_tank_name(t_display)
-            if norm_t in dead_names_norm:
-                continue
+            is_destroyed = norm_t in dead_names_norm
 
             # Resolve display name to internal tag
             tag = self._name_to_tag.get(t_display) or norm_map.get(norm_t)
@@ -626,13 +625,14 @@ class App(tk.Tk):
             if not tag:
                 tag = CYRILLIC_FALLBACK.get(t_display)
 
-            if tag and tag not in seen:
-                display_name = tag
-                if tag in self._tag_to_name:
-                    display_name = self._tag_to_name[tag].get("short_name", self._tag_to_name[tag].get("name", tag))
-                result.append(display_name)
-                seen.add(tag)
-            elif not tag:
+            if tag:
+                if tag not in seen_tags:
+                    result.append({
+                        "tag": tag,
+                        "destroyed": is_destroyed
+                    })
+                    seen_tags.add(tag)
+            else:
                 self._log_msg(f"[server] Could not resolve tag for: '{t_display}'")
 
         self._log_msg(f"[server] Returning {len(result)} tank(s) for '{nickname}'")
@@ -943,6 +943,11 @@ class App(tk.Tk):
     def _on_close(self):
         self._stop_watcher()
         self._server.stop()
+        self._loop.call_soon_threadsafe(self._loop.stop)
+
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+        self.destroy()
         self._loop.call_soon_threadsafe(self._loop.stop)
 
         sys.stdout = sys.__stdout__

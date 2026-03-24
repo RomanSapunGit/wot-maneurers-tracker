@@ -7,8 +7,6 @@ from gui.Scaleform.daapi.view.lobby.rally.UnitUserCMHandler import UnitUserCMHan
 MOD_LINKAGE  = 'com.roman.custom_info_panel'
 SERVER_URL   = 'http://localhost:8082/tanks'
 ACTION_ID    = 'showVehicleList'
-WINDOW_ALIAS = 'VehicleListWindow'
-WINDOW_SWF   = 'vehicleListWindow.swf'
 
 def _log(msg):
     BigWorld.logInfo('CustomInfoPanel', msg, None)
@@ -16,9 +14,13 @@ def _log(msg):
 def _err(msg):
     BigWorld.logError('CustomInfoPanel', msg, None)
 
-_pendingAccId = [None]
-_pendingName  = [None]
-_windowData   = [None]
+_pendingAccId     = [None]
+_pendingName      = [None]
+_fetchedTanks     = [None]
+_interceptNext    = [False]
+_battleRoomRef    = [None]
+_injectedVehicles = [None]
+
 
 def _fetchVehicles(account_id):
     url = SERVER_URL + '?account_id=' + str(account_id)
@@ -34,115 +36,395 @@ def _fetchVehicles(account_id):
         _err('fetch error: ' + str(e))
         return []
 
-def _formatTag(tag):
-    # Tags are now plain display names, no formatting needed
-    return tag, ''
 
-def _buildSettingsData(tanks, player_name):
-    col1 = []
-    col2 = []
-    if tanks:
-        mid = (len(tanks) + 1) // 2
-        left = tanks[:mid]
-        right = tanks[mid:]
-        for i, tag in enumerate(left):
-            col1.append({'type': 'Label', 'text': str(tag)})
-            col2.append({'type': 'Label', 'text': str(right[i]) if i < len(right) else ''})
-    else:
-        col1.append({'type': 'Label', 'text': 'No vehicles found'})
-        col2.append({'type': 'Label', 'text': ''})
-
-    title = (player_name + "'s Vehicles") if player_name else 'Vehicle List'
-    return [{
-        'linkage':        MOD_LINKAGE,
-        'modDisplayName': title,
-        'enabled':        True,
-        'column1':        col1,
-        'column2':        col2,
-        'settings':       {},
-        'hotkeys':        [],
-    }]
-
-def _buildLocalization():
-    return {
-        'windowTitle':  'Vehicle List',
-        'stateTooltip': '',
-        'buttonOK':     'OK',
-        'buttonCancel': 'Cancel',
-        'buttonApply':  'Apply',
-        'buttonClose':  'Close',
-    }
-
-def _registerWindowView():
+def _buildVehicleDict(tank_data):
     try:
-        from gui.Scaleform.framework import g_entitiesFactories, ViewSettings, ScopeTemplates
-        from gui.Scaleform.framework.entities.View import View
-
-        class _VehicleListView(View):
-
-            def _populate(self):
-                super(_VehicleListView, self)._populate()
-                _log('_populate called')
-                # Do NOT send data here - requestModsData fires first and handles it
-
-            def _sendData(self):
-                if not self.flashObject:
-                    _err('flashObject is None')
-                    return
-                tanks, player_name = _windowData[0] if _windowData[0] else ([], None)
-                try:
-                    self.flashObject.as_setLocalization(_buildLocalization())
-                    self.flashObject.as_setData(_buildSettingsData(tanks, player_name))
-                    self.flashObject.as_setHotkeys([])
-                    _log('Data sent OK')
-                except Exception as e:
-                    _err('_sendData error: ' + str(e))
-
-            def requestModsData(self):
-                _log('requestModsData called')
-                self._sendData()
-
-            def hotKeyAction(self, linkage, varName, action):
-                pass
-
-            def buttonAction(self, linkage, varName, value):
-                pass
-
-            def closeView(self):
-                _log('closeView called')
-                self.destroy()
-
-            def _dispose(self):
-                _log('_dispose called')
-                super(_VehicleListView, self)._dispose()
-
-        g_entitiesFactories.addSettings(
-            ViewSettings(
-                WINDOW_ALIAS,
-                _VehicleListView,
-                WINDOW_SWF,
-                10,
-                None,
-                ScopeTemplates.GLOBAL_SCOPE,
-            )
-        )
-        _log('View registered OK')
+        from helpers import dependency
+        from skeletons.gui.shared import IItemsCache
+        from items import vehicles as veh_items
+        itemsCache = dependency.instance(IItemsCache)
+        if not tank_data:
+            return {}
+        result = {}
+        for entry in tank_data:
+            try:
+                tag = entry.get('tag')
+                is_destroyed = entry.get('destroyed', False)
+                cd = veh_items.makeVehicleTypeCompDescrByName(str(tag))
+                synthetic_veh = _createSyntheticVehicle(cd, itemsCache, is_destroyed)
+                if synthetic_veh is not None:
+                    result[cd] = synthetic_veh
+            except Exception as e:
+                _log('Could not resolve: ' + str(entry) + ': ' + str(e))
+        _log('Built synthetic vehicle dict: ' + str(len(result)))
+        return result
     except Exception as e:
-        _err('_registerWindowView error: ' + str(e))
+        _err('_buildVehicleDict error: ' + str(e))
+        return {}
 
-def _openWindow(tanks, player_name):
-    _windowData[0] = (tanks, player_name)
+
+def _createSyntheticVehicle(compact_descr, itemsCache, is_destroyed=False):
     try:
-        from gui.Scaleform.framework.managers.loaders import SFViewLoadParams
-        from gui.shared.personality import ServicesLocator
-        app = ServicesLocator.appLoader.getDefLobbyApp()
-        if app:
-            app.loadView(SFViewLoadParams(WINDOW_ALIAS, parent=None), ctx=None)
-            _log('loadView called OK')
+        from gui.shared.utils.requesters import REQ_CRITERIA
+        player_vehicles = itemsCache.items.getVehicles(REQ_CRITERIA.INVENTORY)
+        template = None
+        for veh in player_vehicles.itervalues():
+            if veh.intCD == compact_descr:
+                template = veh
+                break
+        if template is not None:
+            return _stripInventoryState(template, is_destroyed)
+        return _createFromDescriptor(compact_descr, is_destroyed)
+    except Exception as e:
+        _err('_createSyntheticVehicle error: ' + str(e))
+        return None
+
+
+def _stripInventoryState(vehicle, is_destroyed=False):
+    try:
+        class CleanVehicleProxy(object):
+            def __init__(self, base_vehicle, destroyed):
+                self._base = base_vehicle
+                self.is_destroyed = destroyed
+
+            @property
+            def intCD(self):
+                return self._base.intCD
+
+            @property
+            def name(self):
+                return self._base.name
+
+            @property
+            def userName(self):
+                return self._base.userName
+
+            @property
+            def level(self):
+                return self._base.level
+
+            @property
+            def type(self):
+                return self._base.type
+
+            @property
+            def descriptor(self):
+                return self._base.descriptor
+
+            @property
+            def hasCrew(self):
+                return True
+
+            @property
+            def isCrewFull(self):
+                return True
+
+            @property
+            def crewCompactDescrs(self):
+                return []
+
+            @property
+            def equipment(self):
+                return []
+
+            @property
+            def shells(self):
+                return []
+
+            @property
+            def isReadyToFight(self):
+                return not self.is_destroyed
+
+            @property
+            def isBroken(self):
+                return self.is_destroyed
+
+            @property
+            def repairCost(self):
+                return 0
+
+            @property
+            def isLocked(self):
+                return self.is_destroyed
+
+            @property
+            def clanLock(self):
+                return 0
+
+            @property
+            def isRented(self):
+                return False
+
+            @property
+            def rentalIsOver(self):
+                return False
+
+            def __getattr__(self, name):
+                return getattr(self._base, name)
+
+        return CleanVehicleProxy(vehicle, is_destroyed)
+    except Exception as e:
+        _err('_stripInventoryState error: ' + str(e))
+        return vehicle
+
+
+def _createFromDescriptor(compact_descr, is_destroyed=False):
+    try:
+        from items.vehicles import VehicleDescr
+        type_descr = VehicleDescr(compactDescr=compact_descr)
+
+        class GhostVehicle(object):
+            def __init__(self, descr, destroyed):
+                self._descr = descr
+                self.intCD = compact_descr
+                self.is_destroyed = destroyed
+
+            @property
+            def descriptor(self):
+                return self._descr
+
+            @property
+            def name(self):
+                return self._descr.name
+
+            @property
+            def userName(self):
+                return self._descr.type.userString
+
+            @property
+            def level(self):
+                return self._descr.level
+
+            @property
+            def type(self):
+                return self._descr.type.tags
+
+            @property
+            def hasCrew(self):
+                return True
+
+            @property
+            def isCrewFull(self):
+                return True
+
+            @property
+            def crewCompactDescrs(self):
+                return []
+
+            @property
+            def isReadyToFight(self):
+                return not self.is_destroyed
+
+            @property
+            def isBroken(self):
+                return self.is_destroyed
+
+            @property
+            def isLocked(self):
+                return self.is_destroyed
+
+            @property
+            def isRented(self):
+                return False
+
+        return GhostVehicle(type_descr, is_destroyed)
+    except Exception as e:
+        _err('_createFromDescriptor error: ' + str(e))
+        return None
+
+
+def _cleanupVO(vo, vehicle=None):
+    """Only touch keys that exist in VehicleSelectorItemVO schema."""
+    is_destroyed = getattr(vehicle, 'is_destroyed', False) if vehicle else False
+    vo['isReadyToFight'] = not is_destroyed
+    vo['enabled'] = not is_destroyed
+    vo['state'] = 'destroyed' if is_destroyed else ''
+    return vo
+
+
+_inLogic = [False]
+
+def _applyInjection(self, vehicle_dict):
+    if _inLogic[0]:
+        return
+    _injectedVehicles[0] = vehicle_dict
+    self._vehicles = vehicle_dict
+    _log('Applying injection: ' + str(len(vehicle_dict)) + ' vehicles')
+    try:
+        # Final filter state detection based on diagnostic logs
+        show_not_ready = True
+        filters = getattr(self, '_VehicleSelectorBase__filters', {})
+        if isinstance(filters, dict) and 'compatibleOnly' in filters:
+            show_not_ready = not filters['compatibleOnly']
+            _log('Filter state: show_not_ready=' + str(show_not_ready) + ' (via compatibleOnly)')
         else:
-            _err('No lobby app')
+            # Fallback for other selector types
+            _log('Filter state: compatibleOnly not found in ' + str(filters))
+        
+        vo_list = []
+        for cd, vehicle in vehicle_dict.items():
+            try:
+                vo = self._makeVehicleVOAction(vehicle)
+                if vo is not None:
+                    vo = _cleanupVO(vo, vehicle)
+                    
+                    # Manual filter check
+                    if not show_not_ready and not vo.get('isReadyToFight', True):
+                        continue
+                        
+                    vo_list.append(vo)
+            except Exception as e:
+                _log('VO build error for ' + str(cd) + ': ' + str(e))
+
+        _log('Built ' + str(len(vo_list)) + ' VOs (total injected: ' + str(len(vehicle_dict)) + ')')
+        self.as_setListDataS(vo_list, [])
     except Exception as e:
-        _err('open error: ' + str(e))
+        _err('_applyInjection error: ' + str(e))
+        _injectedVehicles[0] = None
+
+
+def _hookBattleRoom():
+    try:
+        import gui.Scaleform.daapi.view.lobby.fortifications.stronghold_battle_room as m
+        cls = m.StrongholdBattleRoom
+
+        original_populate = cls._populate
+
+        def patched_populate(self, *args, **kwargs):
+            _log('StrongholdBattleRoom captured')
+            _battleRoomRef[0] = self
+            return original_populate(self, *args, **kwargs)
+
+        cls._populate = patched_populate
+
+        original_dispose = cls._dispose
+
+        def patched_dispose(self, *args, **kwargs):
+            if _battleRoomRef[0] is self:
+                _battleRoomRef[0] = None
+            return original_dispose(self, *args, **kwargs)
+
+        cls._dispose = patched_dispose
+        _log('StrongholdBattleRoom hooks installed')
+    except Exception as e:
+        _err('_hookBattleRoom error: ' + str(e))
+
+
+def _hookVehicleSelector():
+    try:
+        import gui.Scaleform.daapi.view.lobby.cyberSport.VehicleSelectorPopup as m
+        cls = m.VehicleSelectorPopup
+
+        original_updateData       = cls._updateData
+        original_updateDataPublic = cls.updateData
+        original_onFiltersUpdate  = cls.onFiltersUpdate
+        original_setListData      = cls.as_setListDataS
+        original_dispose          = cls._dispose
+
+        # ----------------------------------------------------------------
+        # as_setListDataS — diagnostic only
+        # ----------------------------------------------------------------
+        def patched_setListData(self, data, selectedData=None):
+            _log('as_setListDataS called, len=' + str(len(data) if data else 0))
+            return original_setListData(self, data, selectedData)
+
+        cls.as_setListDataS = patched_setListData
+
+        # ----------------------------------------------------------------
+        # _updateData (private, called with criteria arg)
+        # ----------------------------------------------------------------
+        def patched_updateData(self, criteria, *args, **kwargs):
+            if _interceptNext[0] and _fetchedTanks[0] is not None:
+                _log('_updateData intercepted')
+                _interceptNext[0] = False
+                vehicle_dict = _buildVehicleDict(_fetchedTanks[0])
+                if vehicle_dict:
+                    _applyInjection(self, vehicle_dict)
+                    return
+            return original_updateData(self, criteria, *args, **kwargs)
+
+        cls._updateData = patched_updateData
+
+        # ----------------------------------------------------------------
+        # updateData (public)
+        # ----------------------------------------------------------------
+        def patched_updateDataPublic(self, *args, **kwargs):
+            _log('updateData called, injected=' + str(_injectedVehicles[0] is not None))
+            if _injectedVehicles[0] is not None:
+                _applyInjection(self, _injectedVehicles[0])
+                return
+            if _interceptNext[0] and _fetchedTanks[0] is not None:
+                _log('updateData no-args intercept')
+                _interceptNext[0] = False
+                vehicle_dict = _buildVehicleDict(_fetchedTanks[0])
+                if vehicle_dict:
+                    _applyInjection(self, vehicle_dict)
+                return
+            if not args and not kwargs:
+                _log('updateData no args, nothing to inject - skipping')
+                return
+            return original_updateDataPublic(self, *args, **kwargs)
+
+        cls.updateData = patched_updateDataPublic
+
+        # ----------------------------------------------------------------
+        # showNotReadyVehicles — capture the filter state
+        # ----------------------------------------------------------------
+        original_showNotReadyVehicles = cls.showNotReadyVehicles
+        def patched_showNotReadyVehicles(self, show, *args, **kwargs):
+            _log('showNotReadyVehicles callback: ' + str(show))
+            self._customShowNotReady = show
+            return original_showNotReadyVehicles(self, show, *args, **kwargs)
+
+        cls.showNotReadyVehicles = patched_showNotReadyVehicles
+
+        # ----------------------------------------------------------------
+        # onFiltersUpdate — intercept to trigger re-injection
+        # ----------------------------------------------------------------
+        def patched_onFiltersUpdate(self, *args, **kwargs):
+            _log('onFiltersUpdate intercepted - calling original')
+            _inLogic[0] = True
+            try:
+                original_onFiltersUpdate(self, *args, **kwargs)
+            finally:
+                _inLogic[0] = False
+                
+            if _injectedVehicles[0] is not None:
+                _applyInjection(self, _injectedVehicles[0])
+            return
+
+        cls.onFiltersUpdate = patched_onFiltersUpdate
+
+        # ----------------------------------------------------------------
+        # _dispose — clear state when popup closes
+        # ----------------------------------------------------------------
+        def patched_dispose(self, *args, **kwargs):
+            _injectedVehicles[0] = None
+            _fetchedTanks[0] = None
+            return original_dispose(self, *args, **kwargs)
+
+        cls._dispose = patched_dispose
+        _log('VehicleSelectorPopup hooked')
+    except Exception as e:
+        _err('_hookVehicleSelector error: ' + str(e))
+
+
+def _openVehicleSelector(tanks, player_name):
+    _log('Opening for: ' + str(player_name))
+    _fetchedTanks[0] = tanks
+    _interceptNext[0] = True
+    _injectedVehicles[0] = None
+    room = _battleRoomRef[0]
+    if room is not None:
+        try:
+            room._chooseVehicleRequest((1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+            _log('_chooseVehicleRequest OK')
+            return
+        except Exception as e:
+            _err('_chooseVehicleRequest error: ' + str(e))
+    _err('No StrongholdBattleRoom instance')
+    _interceptNext[0] = False
+
 
 def _override(module, func_name):
     def decorator(fn):
@@ -157,6 +439,7 @@ def _override(module, func_name):
         return wrapper
     return decorator
 
+
 @_override(UnitUserCMHandler, '_addPrebattleInfo')
 def _hookedAddPrebattleInfo(original, self, options, userCMInfo):
     try:
@@ -168,145 +451,20 @@ def _hookedAddPrebattleInfo(original, self, options, userCMInfo):
     options.append(self._makeItem(ACTION_ID, 'View Vehicles'))
     return options
 
+
 @_override(UnitUserCMHandler, 'onOptionSelect')
 def _hookedOnOptionSelect(original, self, optionId):
     if optionId == ACTION_ID:
         if _pendingAccId[0]:
             _log('Fetching for: ' + str(_pendingName[0]))
             tanks = _fetchVehicles(_pendingAccId[0])
-            _openWindow(tanks, _pendingName[0])
+            _openVehicleSelector(tanks, _pendingName[0])
         else:
             _err('No pending account id')
         return
     return original(self, optionId)
 
+
 _log('init')
-_registerWindowView()
-
-def _inspectPopover():
-    try:
-        from gui.Scaleform.daapi.view.lobby.fortifications.FortVehicleSelectPopover \
-            import FortVehicleSelectPopover
-        methods = [m for m in dir(FortVehicleSelectPopover) if not m.startswith('__')]
-        _log('Popover methods: ' + str(methods))
-    except Exception as e:
-        _err('inspect error: ' + str(e))
-
-BigWorld.callback(5.0, _inspectPopover)
-
-def _inspectPopover():
-    try:
-        import gui.Scaleform.daapi.view.lobby.fortifications.FortVehicleSelectPopover as m
-        cls = getattr(m, 'FortVehicleSelectPopover', None)
-        if cls:
-            methods = [x for x in dir(cls) if not x.startswith('__')]
-            _log('Popover methods: ' + str(methods))
-        else:
-            _log('Class not found in module, attrs: ' + str(dir(m)))
-    except ImportError as e:
-        _err('ImportError: ' + str(e))
-        # Try alternate path
-        try:
-            import gui.Scaleform.daapi.view.lobby.fortifications as fort
-            _log('Fort module attrs: ' + str(dir(fort)))
-        except Exception as e2:
-            _err('Fort module error: ' + str(e2))
-    except Exception as e:
-        _err('inspect error: ' + str(e))
-
-# Hook into the view loading to catch it at the right moment
-try:
-    from gui.shared import g_eventBus, EVENT_BUS_SCOPE
-    from gui.shared.events import ComponentEvent
-
-    def _onComponentRegistered(event):
-        if 'FortVehicle' in str(getattr(event, 'alias', '')):
-            _log('FortVehicle component registered: ' + str(event.alias))
-            _inspectPopover()
-
-    g_eventBus.addListener(
-        ComponentEvent.COMPONENT_REGISTERED,
-        _onComponentRegistered,
-        EVENT_BUS_SCOPE.GLOBAL
-    )
-    _log('Component listener registered')
-except Exception as e:
-    _err('listener error: ' + str(e))
-
-def _inspectPopover():
-    try:
-        import gui.Scaleform.daapi.view.lobby.fortifications.FortVehicleSelectPopover as m
-        cls = getattr(m, 'FortVehicleSelectPopover', None)
-        if cls:
-            methods = [x for x in dir(cls) if not x.startswith('__')]
-            _log('Popover methods: ' + str(methods))
-        else:
-            _log('Class not found in module, attrs: ' + str(dir(m)))
-    except ImportError as e:
-        _err('ImportError: ' + str(e))
-        # Try alternate path
-        try:
-            import gui.Scaleform.daapi.view.lobby.fortifications as fort
-            _log('Fort module attrs: ' + str(dir(fort)))
-        except Exception as e2:
-            _err('Fort module error: ' + str(e2))
-    except Exception as e:
-        _err('inspect error: ' + str(e))
-
-# Hook into the view loading to catch it at the right moment
-try:
-    from gui.shared import g_eventBus, EVENT_BUS_SCOPE
-    from gui.shared.events import ComponentEvent
-
-    def _onComponentRegistered(event):
-        if 'FortVehicle' in str(getattr(event, 'alias', '')):
-            _log('FortVehicle component registered: ' + str(event.alias))
-            _inspectPopover()
-
-    g_eventBus.addListener(
-        ComponentEvent.COMPONENT_REGISTERED,
-        _onComponentRegistered,
-        EVENT_BUS_SCOPE.GLOBAL
-    )
-    _log('Component listener registered')
-except Exception as e:
-    _err('listener error: ' + str(e))
-
-def _inspectPopover():
-    try:
-        import gui.Scaleform.daapi.view.lobby.fortifications.FortVehicleSelectPopover as m
-        cls = getattr(m, 'FortVehicleSelectPopover', None)
-        if cls:
-            methods = [x for x in dir(cls) if not x.startswith('__')]
-            _log('Popover methods: ' + str(methods))
-        else:
-            _log('Class not found in module, attrs: ' + str(dir(m)))
-    except ImportError as e:
-        _err('ImportError: ' + str(e))
-        # Try alternate path
-        try:
-            import gui.Scaleform.daapi.view.lobby.fortifications as fort
-            _log('Fort module attrs: ' + str(dir(fort)))
-        except Exception as e2:
-            _err('Fort module error: ' + str(e2))
-    except Exception as e:
-        _err('inspect error: ' + str(e))
-
-# Hook into the view loading to catch it at the right moment
-try:
-    from gui.shared import g_eventBus, EVENT_BUS_SCOPE
-    from gui.shared.events import ComponentEvent
-
-    def _onComponentRegistered(event):
-        if 'FortVehicle' in str(getattr(event, 'alias', '')):
-            _log('FortVehicle component registered: ' + str(event.alias))
-            _inspectPopover()
-
-    g_eventBus.addListener(
-        ComponentEvent.COMPONENT_REGISTERED,
-        _onComponentRegistered,
-        EVENT_BUS_SCOPE.GLOBAL
-    )
-    _log('Component listener registered')
-except Exception as e:
-    _err('listener error: ' + str(e))
+_hookBattleRoom()
+_hookVehicleSelector()
